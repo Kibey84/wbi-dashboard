@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WBI Business Development Center</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        .tab-button.active { border-bottom: 3px solid #F59E0B; color: #111827; font-weight: 600; }
+        .log-entry, .project-card-item { animation: fadeIn 0.3s ease-in-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+        .file-upload { border: 2px dashed #E5E7EB; transition: all 0.3s ease; }
+        .file-upload:hover, .file-upload.dragover { border-color: #3B82F6; background-color: #F0F9FF; }
+    </style>
+</head>
+<body class="font-sans bg-gray-100 min-h-screen">
+    <header class="bg-black py-6 px-4 shadow-md">
+        <div class="max-w-7xl mx-auto flex flex-col items-center">
+            <div class="bg-white rounded-lg p-2 mb-4 shadow-md">
+                <img src="{{ url_for('static', filename='images/wbi-logo-horz.png') }}" alt="WBI Logo" class="h-32">
+            </div>
+            <h1 class="text-3xl font-bold text-white text-center">Business Development Center</h1>
+            <p class="text-gray-300 text-center mt-2 max-w-2xl">An integrated suite of tools for opportunity discovery, proposal generation, and estimation.</p>
+        </div>
+    </header>
+    <div class="border-t-2 border-black"></div>
+    <main class="max-w-7xl mx-auto py-8 px-4">
+        <div class="flex border-b border-gray-200 mb-8 overflow-x-auto">
+            <button class="tab-button active px-6 py-3 text-gray-500 hover:text-gray-700 font-medium" data-tab="tab1">Opportunity Pipeline</button>
+            <button class="tab-button px-6 py-3 text-gray-500 hover:text-gray-700 font-medium" data-tab="tab2">Org Chart Parser</button>
+            <button class="tab-button px-6 py-3 text-gray-500 hover:text-gray-700 font-medium" data-tab="tab5">Project Reporting</button>
+            <button class="tab-button px-6 py-3 text-gray-500 hover:text-gray-700 font-medium" data-tab="tab3">Proposal Generator</button>
+            <button class="tab-button px-6 py-3 text-gray-500 hover:text-gray-700 font-medium" data-tab="tab4">BoE Generator</button>
+        </div>
+        <div id="tab1" class="tab-content active">
+            <h2 class="text-2xl font-bold text-gray-800 mb-6">Opportunity Discovery Pipeline</h2>
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
+                <div class="bg-white rounded-xl shadow-md p-6 border border-gray-200"><h3 class="text-xl font-semibold text-gray-800">🚀 Start New Run</h3><p class="text-gray-600 my-4">Click to run the full pipeline for opportunity discovery and matchmaking.</p><button id="runPipelineBtn" class="w-full bg-yellow-500 hover:bg-yellow-600 text-gray-900 font-bold py-3 px-4 rounded-lg transition duration-200">▶️ Run Full Pipeline</button></div>
+                <div class="bg-white rounded-xl shadow-md p-6 border border-gray-200"><h3 class="text-xl font-semibold text-gray-800">📊 Latest Reports</h3><p class="text-gray-600 my-4">Download the output files from the most recent run.</p><div class="grid grid-cols-1 md:grid-cols-2 gap-4"><button id="downloadOppsBtn" disabled class="flex items-center justify-center bg-gray-800 text-white font-medium py-3 px-4 rounded-lg transition disabled:opacity-50">Download Opps Report</button><button id="downloadMatchBtn" disabled class="flex items-center justify-center bg-gray-800 text-white font-medium py-3 px-4 rounded-lg transition disabled:opacity-50">Download Matchmaking Report</button></div></div>
+            </div>
+            <div id="pipelineProgress" class="hidden bg-white rounded-xl shadow-md p-6 border border-gray-200 mb-8"><h3 class="text-xl font-semibold text-gray-800 mb-4">Pipeline Progress</h3><div id="logContainer" class="space-y-3 p-4 bg-gray-900 text-white font-mono rounded-lg text-sm"></div></div>
+        </div>
+        <div id="tab2" class="tab-content">
+            <h2 class="text-2xl font-bold text-gray-800 mb-6">AI Organization Chart Parser</h2><p class="text-gray-600 mb-8">Upload an organizational chart (PDF) to automatically extract its structure.</p>
+            <div class="bg-white rounded-xl shadow-md p-6 border border-gray-200 mb-8"><div id="fileUpload" class="file-upload rounded-lg p-8 text-center cursor-pointer"><p class="text-gray-600 mb-2 font-medium">Drag and drop your PDF file here</p><p class="text-gray-500 text-sm">or click to browse files</p><input type="file" id="pdfUpload" class="hidden" accept=".pdf"></div><div id="uploadSuccess" class="hidden mt-4 p-4 bg-green-50 text-green-700 rounded-lg"><span id="fileName"></span></div><button id="parseBtn" class="hidden w-full mt-6 bg-yellow-500 text-gray-900 font-bold py-3 px-4 rounded-lg">🤖 Parse with AI</button><div id="parsingSpinner" class="hidden mt-6 p-6 text-center"><p class="text-gray-600">Processing...</p></div><div id="downloadSection" class="hidden mt-8"><h3 class="text-lg font-semibold text-gray-800 mb-4">Download Your Report</h3><button id="downloadReportBtn" class="flex items-center justify-center w-full bg-gray-800 text-white font-medium py-3 px-4 rounded-lg">Download Report</button></div></div>
+        </div>
+        <div id="tab5" class="tab-content"><h2 class="text-2xl font-bold text-gray-800 mb-6">Monthly Project Status Reporting</h2><div class="bg-white p-4 rounded-lg shadow-sm mb-6 flex flex-wrap items-center gap-4"><div class="flex items-center gap-2"><label for="pmFilter" class="font-medium text-gray-700">Filter by PM:</label><select id="pmFilter" class="p-2 border border-gray-300 rounded-md"><option value="All">Select a Manager...</option></select></div><div class="flex items-center gap-2"><label for="statusFilter" class="font-medium text-gray-700">Filter by Status:</label><select id="statusFilter" class="p-2 border border-gray-300 rounded-md"><option value="All">All Projects</option><option value="Active">Active</option><option value="Completed">Completed</option><option value="Terminated">Terminated</option></select></div></div><div class="grid grid-cols-1 md:grid-cols-4 gap-6"><div class="md:col-span-1 bg-white p-4 rounded-lg shadow-sm"><h3 class="font-bold text-lg mb-2 border-b pb-2">Projects</h3><div id="project-list-menu" class="space-y-2 max-h-[600px] overflow-y-auto"><p class="text-gray-500 text-sm">Select a PM to see projects.</p></div></div><div id="project-detail-view" class="md:col-span-3"><div class="bg-white rounded-xl shadow-md p-6 border border-gray-200 text-center"><p class="text-gray-500">Please select a Project Manager to begin.</p></div></div></div></div>
+        <div id="tab3" class="tab-content"><div class="bg-white rounded-xl shadow-md p-6 border"><p>This section is under construction.</p></div></div>
+        <div id="tab4" class="tab-content"><div class="bg-white rounded-xl shadow-md p-6 border"><p>This section is under construction.</p></div></div>
+    </main>
+    <footer class="bg-black text-white py-8 mt-auto">
+        <div class="max-w-7xl mx-auto px-4"><div class="border-t border-gray-700 pt-8"><div class="flex flex-col items-center"><img src="{{ url_for('static', filename='images/wbi-logo-crest.png') }}" alt="WBI Crest Logo" class="h-20 mb-6"><p class="text-gray-400 text-sm">&copy; 2025 WBI Business Development Center. All rights reserved.</p></div></div></div>
+    </footer>
+    <script src="{{ url_for('static', filename='main.js') }}"></script>
+</body>
+</html>
