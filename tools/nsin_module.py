@@ -1,4 +1,5 @@
 # nsin_module.py
+
 import logging
 import requests
 import time
@@ -27,7 +28,6 @@ if not logger.handlers:
     logger.setLevel(logging.INFO)
     logger.propagate = False
 
-# Default values for the module
 MODULE_DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
 }
@@ -102,7 +102,6 @@ def _parse_nsin_detail_page(detail_url: str, headers_to_use: dict):
         logger.error(f"[{module_name}] Error parsing detail page {detail_url}: {e_detail_parse}", exc_info=False)
         
     return title, description, open_date_obj, closing_date_obj
-
 
 def fetch_nsin_opportunities(driver: WebDriver, headers: dict):
     """
@@ -202,7 +201,6 @@ if __name__ == '__main__':
 
     if standalone_driver:
         try:
-            # Call the updated function without keyword arguments
             test_opportunities = fetch_nsin_opportunities(
                 driver=standalone_driver,
                 headers=MODULE_DEFAULT_HEADERS

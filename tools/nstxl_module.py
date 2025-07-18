@@ -1,4 +1,5 @@
 # nstxl_module.py
+
 import time
 import logging
 from bs4 import BeautifulSoup, Tag
@@ -62,7 +63,6 @@ def _parse_nstxl_date(date_text_str: str, module_name_for_log="NSTXL") -> str:
     
     logger.error(f"[{module_name_for_log}] Failed to parse extracted date string: '{string_to_parse}'")
     return "N/A (Parsing Failed)"
-
 
 def fetch_nstxl_opportunities(driver: WebDriver) -> list:
     """
@@ -174,7 +174,6 @@ if __name__ == '__main__':
 
     if standalone_driver_nstxl:
         try:
-            # Call the updated function without keyword arguments
             test_opportunities = fetch_nstxl_opportunities(driver=standalone_driver_nstxl)
             if test_opportunities:
                 print("\n--- Scraped NSTXL Opportunities ---")

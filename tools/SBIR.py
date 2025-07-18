@@ -5,7 +5,6 @@ import logging
 from datetime import datetime
 
 # --- Configuration ---
-# FIX: The scraper will now only look at the previous and current year.
 START_YEAR = datetime.now().year - 1 
 CURRENT_YEAR = datetime.now().year
 OUTPUT_FILENAME = "Discovered Companies.xlsx"

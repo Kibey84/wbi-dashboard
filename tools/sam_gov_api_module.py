@@ -1,11 +1,12 @@
 # sam_gov_api_module.py
+
 import time
 import requests
 import logging
 from datetime import datetime, timedelta
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, RetryError
 import json
-import os # <-- FIX: Added missing import
+import os 
 
 module_logger = logging.getLogger(__name__)
 if not module_logger.handlers:
@@ -47,7 +48,7 @@ def fetch_sam_gov_opportunities(api_key: str) -> list:
     API_LIMIT_PER_PAGE = 100
     MAX_TOTAL_RECORDS_TO_FETCH = 500 # Safety cap
     DELAY_BETWEEN_PAGES_SECONDS = 5
-    DAYS_TO_LOOK_BACK = 14 # Look for opportunities posted in the last two weeks
+    DAYS_TO_LOOK_BACK = 14 
 
     all_api_results = []
     
@@ -75,7 +76,7 @@ def fetch_sam_gov_opportunities(api_key: str) -> list:
         module_logger.info(f"Querying SAM.gov API. Limit: {API_LIMIT_PER_PAGE}, Offset: {current_offset}")
         
         try:
-            data = _make_sam_api_request_with_retries(api_url, params, {}, module_logger) # No special headers needed
+            data = _make_sam_api_request_with_retries(api_url, params, {}, module_logger) 
             notices = data.get("opportunitiesData", [])
             total_records_for_query = data.get("totalRecords", 0)
             
@@ -93,11 +94,10 @@ def fetch_sam_gov_opportunities(api_key: str) -> list:
                 if not link and notice.get("solicitationNumber"):
                     link = f"https://sam.gov/opp/{notice.get('solicitationNumber')}/view"
                 
-                # The AI will perform the analysis, so we append every record
                 all_api_results.append({
                     "Source": "SAM.gov API", 
                     "Title": title,
-                    "Description": description[:2000], # Truncate for brevity
+                    "Description": description[:2000], 
                     "URL": link,
                     "ScrapedDate": datetime.now().isoformat(),
                     "Close Date": notice.get("responseDeadLine")

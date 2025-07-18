@@ -1,4 +1,5 @@
 # nasa_sbir_module.py
+
 # ====== IMPORTS ======
 import time
 import logging
@@ -13,7 +14,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
-from selenium.webdriver.remote.webdriver import WebDriver # For type hinting
+from selenium.webdriver.remote.webdriver import WebDriver 
 from bs4 import BeautifulSoup, Tag
 
 # Module-specific logger
@@ -61,7 +62,6 @@ def _parse_nasa_date(date_str: str, current_datetime_obj: datetime, module_name_
 
     logger.warning(f"[{module_name_for_log}] Could not parse date string '{date_str_cleaned}' for {date_type}.")
     return None
-
 
 def fetch_nasa_sbir_opportunities(driver: WebDriver, headers: dict):
     """
@@ -184,7 +184,6 @@ if __name__ == '__main__':
 
     if standalone_driver_nasa:
         try:
-            # Call the updated function
             scraped_data_nasa = fetch_nasa_sbir_opportunities(
                 driver=standalone_driver_nasa,
                 headers=DEFAULT_HEADERS_NASA

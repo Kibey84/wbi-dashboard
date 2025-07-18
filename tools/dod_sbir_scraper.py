@@ -1,4 +1,5 @@
 # dod_sbir_scraper.py
+
 # ====== IMPORTS ======
 import time
 import logging
@@ -52,15 +53,12 @@ def _parse_dod_date(date_text_str_param, module_name_for_log="DoD SBIR Scraper")
     
     if match:
         extracted_date_str = match.group(1).strip()
-        # Clean time and timezone info
         extracted_date_str = re.sub(r"\s*(at|by|before|until|,|@)?\s*\d{{1,2}}:\d{{2}}(?::\d{{2}})?\s*(am|pm)?\s*([a-zA-Z]{2,5}T?|[A-Z]{2,5}|[A-Za-z]{2,5}/\s*[A-Za-z]{2,5})?\s*(\(.*\))?$", "", extracted_date_str, flags=re.IGNORECASE).strip()
         extracted_date_str = extracted_date_str.rstrip(',').strip()
         
-        # Attempt to parse with various formats
         for fmt in ("%B %d, %Y", "%b %d, %Y", "%B %d %Y", "%b %d %Y", "%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%m/%d/%y", "%m-%d-%y"):
             try:
                 dt_obj = datetime.strptime(extracted_date_str, fmt)
-                # Handle 2-digit years
                 if '%y' in fmt.lower() and dt_obj.year > datetime.now().year + 50:
                     dt_obj = dt_obj.replace(year=dt_obj.year - 100)
                 return dt_obj.strftime("%Y-%m-%d")
@@ -155,7 +153,6 @@ def fetch_dod_sbir_sttr_topics(driver: WebDriver):
                 
                 content_html = parent_panel_element.find_element(By.CSS_SELECTOR, "div.mat-expansion-panel-content").get_attribute('innerHTML')
                 
-                # FIX: Check if content_html is not None before parsing
                 if content_html:
                     content_soup = BeautifulSoup(content_html, "html.parser")
                     desc_text = content_soup.get_text(separator=' ', strip=True)

@@ -1,4 +1,5 @@
 # nasc_solutions_module.py
+
 import logging
 import requests
 from bs4 import BeautifulSoup, Tag
@@ -39,13 +40,11 @@ def _parse_nasc_date(date_str: str) -> str:
 
     date_to_parse = date_match.group(1)
     try:
-        # Handle two-digit year, assuming 20xx
         dt_obj = datetime.strptime(date_to_parse, "%m/%d/%y")
-        if dt_obj.year > datetime.now().year + 50: # Heuristic for 19xx vs 20xx
+        if dt_obj.year > datetime.now().year + 50: 
             dt_obj = dt_obj.replace(year=dt_obj.year - 100)
     except ValueError:
         try:
-            # Handle four-digit year
             dt_obj = datetime.strptime(date_to_parse, "%m/%d/%Y")
         except ValueError:
             logger.warning(f"[NASC Date Parser] Could not parse extracted date string '{date_to_parse}' from original '{date_str}'.")
@@ -99,7 +98,6 @@ def _fetch_nasc_detail_page_data(url: str, headers_to_use: dict):
         status_comment_str = "Detail page parse error"
         
     return description_text, due_date_str, is_closed_or_awarded_flag, status_comment_str
-
 
 def fetch_nasc_opportunities(headers_to_use: Optional[dict] = None, max_cards_to_process: Optional[int] = None) -> list:
     """

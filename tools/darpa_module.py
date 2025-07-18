@@ -1,4 +1,5 @@
 # darpa_module.py
+
 # ====== IMPORTS ======
 import time
 import logging
@@ -12,7 +13,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, ElementClickInterceptedException
-from selenium.webdriver.remote.webdriver import WebDriver # For type hinting
+from selenium.webdriver.remote.webdriver import WebDriver 
 from bs4 import BeautifulSoup, Tag
 
 logger = logging.getLogger(__name__)
@@ -155,14 +156,13 @@ def fetch_darpa_opportunities(driver: WebDriver, headers: dict):
                                 close_date_str = temp_date
                                 break
                 
-                # Skip if expired
                 if close_date_str and "N/A" not in close_date_str:
                     try:
                         if datetime.strptime(close_date_str, "%Y-%m-%d") < datetime.now():
                             logger.info(f"[{module_name}] Skipping '{final_title}' (Expired: {close_date_str})")
                             continue
                     except ValueError:
-                        pass # Date couldn't be parsed, will be included for manual review
+                        pass 
                 
                 logger.info(f"✅ [{module_name}] Scraping '{final_title[:60]}'")
                 results.append({

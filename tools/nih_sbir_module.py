@@ -1,4 +1,5 @@
 # nih_sbir_module.py
+
 import time
 import logging
 from urllib.parse import urljoin
@@ -15,7 +16,6 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from selenium.webdriver.remote.webdriver import WebDriver
 
 from bs4 import BeautifulSoup, Tag
-# FIX: Correctly import NavigableString from its specific submodule
 from bs4.element import NavigableString
 
 # Setup logger for this module
@@ -91,7 +91,6 @@ def _process_single_detail_page(driver: WebDriver, link_url: str, listing_title_
         due_date_text = _extract_nih_field(sub_soup, ["Application Due Date(s)", "Expiration Date"])
         application_due_date_str = _parse_nih_date(due_date_text)
 
-        # Skip if the opportunity has already expired
         if application_due_date_str and application_due_date_str != "N/A" and len(application_due_date_str) == 10:
             try:
                 if datetime.strptime(application_due_date_str, "%Y-%m-%d") < datetime.now():
@@ -144,7 +143,6 @@ def fetch_nih_sbir_opportunities(driver: WebDriver):
             cells = row.find_all('td')
             if len(cells) < 2: continue
 
-            # FIX: Process cells explicitly to help Pylance type inference
             first_cell = cells[0]
             second_cell = cells[1]
 
@@ -197,7 +195,6 @@ if __name__ == '__main__':
 
     if standalone_driver_nih:
         try:
-            # Call the updated function without keyword arguments
             scraped_data_nih = fetch_nih_sbir_opportunities(driver=standalone_driver_nih)
             
             if scraped_data_nih:

@@ -1,4 +1,5 @@
 # eureka_module.py
+
 import time
 import logging
 from urllib.parse import urljoin
@@ -16,7 +17,6 @@ from selenium.webdriver.remote.webdriver import WebDriver
 from bs4 import BeautifulSoup
 from bs4.element import Tag
 
-# Initialize logger for this module
 logger = logging.getLogger(__name__)
 if not logger.handlers: 
     _handler = logging.StreamHandler()
@@ -104,7 +104,6 @@ def fetch_eureka_opportunities(driver: WebDriver):
                     lambda tag: isinstance(tag, Tag) and tag.name == 'div' and "deadline:" in tag.get_text(strip=True).lower()
                 )
                 
-                # FIX: Check if the element was found before trying to use it.
                 if deadline_banner_el:
                     date_match = re.search(r"Deadline:\s*(\d{1,2}\s+\w+\s+\d{4})", deadline_banner_el.get_text(strip=True), re.IGNORECASE)
                     if date_match:
@@ -176,7 +175,6 @@ if __name__ == '__main__':
     
     if standalone_driver_eureka:
         try:
-            # Call the updated function
             scraped_data = fetch_eureka_opportunities(driver=standalone_driver_eureka)
             
             if scraped_data:

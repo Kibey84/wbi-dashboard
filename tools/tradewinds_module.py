@@ -1,4 +1,5 @@
 # tradewinds_module.py
+
 import time
 import logging
 import json
@@ -103,7 +104,6 @@ def fetch_tradewinds_opportunities(driver: WebDriver) -> list:
                 final_desc = desc_el.get_text(separator=" ", strip=True) if desc_el and isinstance(desc_el, Tag) else listing_desc
                 final_desc_cleaned = ' '.join(final_desc.split())
 
-                # AI will do the filtering, so we add every opportunity found
                 logger.info(f"[{module_name}]  scraping '{final_title[:60]}'")
                 results.append({
                     "Source": "Tradewinds",
@@ -139,7 +139,6 @@ if __name__ == '__main__':
 
     if standalone_driver:
         try:
-            # Call the updated function without keyword arguments
             test_opportunities = fetch_tradewinds_opportunities(driver=standalone_driver)
             if test_opportunities:
                 logger.info(f"\n--- Scraped {len(test_opportunities)} Tradewinds Opportunities ---")

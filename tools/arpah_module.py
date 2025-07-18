@@ -1,4 +1,5 @@
 # arpah_module.py
+
 # ====== IMPORTS ======
 import time
 import logging
@@ -18,7 +19,6 @@ from selenium.webdriver.remote.webelement import WebElement
 from bs4 import BeautifulSoup
 from bs4.element import NavigableString, Tag
 
-# Setup logger for this module
 logger = logging.getLogger(__name__)
 if not logger.handlers:
     _handler = logging.StreamHandler()
@@ -158,7 +158,7 @@ def fetch_arpah_opportunities(driver: WebDriver, headers: dict):
                             logger.info(f"[{site_name}] Skipping '{title_text}' (Expired: {close_date_str_final})")
                             continue
                     except ValueError:
-                        pass # Non-standard date format, include for manual review
+                        pass 
 
                 logger.info(f"✅ [{site_name} Module] Scraping '{title_text[:60]}'")
                 results.append({
@@ -198,7 +198,6 @@ if __name__ == '__main__':
 
     if standalone_driver_arpah:
         try:
-            # Call the updated function
             scraped_arpah_data = fetch_arpah_opportunities(driver=standalone_driver_arpah, headers=DEFAULT_HEADERS_ARPAH)
             if scraped_arpah_data:
                 print(f"\n--- Scraped {len(scraped_arpah_data)} ARPA-H Opportunities ---")

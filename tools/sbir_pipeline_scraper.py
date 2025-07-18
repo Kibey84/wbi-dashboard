@@ -5,7 +5,7 @@ import docx
 import pandas as pd
 
 try:
-    import SBIR
+    import sbir
     import phase2
     import grading
 except ImportError as e:
@@ -15,7 +15,7 @@ except ImportError as e:
 
 def run_and_read_sbir_pipeline():
     logging.info("[SBIR PIPELINE] Running original 3-phase SBIR pipeline to generate Word docs...")
-    SBIR.run_phase_1()
+    sbir.run_phase_1()
     phase2.run_phase_2()
     grading.run_phase_3() # This creates the Word docs
     logging.info("[SBIR PIPELINE] Word document generation complete.")

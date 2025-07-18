@@ -10,7 +10,7 @@ import logging
 
 from tools import org_chart_parser
 from tools import wbiops
-from tools import SBIR
+from tools import sbir
 
 from azure.storage.blob import BlobServiceClient
 from azure.ai.inference.aio import ChatCompletionsClient

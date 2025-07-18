@@ -1,4 +1,5 @@
 # mtec_module.py
+
 import time
 import logging
 import json
@@ -191,7 +192,6 @@ if __name__ == '__main__':
 
     if standalone_driver_mtec:
         try:
-            # Call the updated function
             test_opportunities = fetch_mtec_opportunities(
                 driver=standalone_driver_mtec,
                 headers=MODULE_DEFAULT_HEADERS

@@ -17,7 +17,7 @@ from selenium.webdriver.remote.webdriver import WebDriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service as ChromeService
 from webdriver_manager.chrome import ChromeDriverManager
-from selenium import webdriver # <-- FIX: Added missing import
+from selenium import webdriver 
 
 logger = logging.getLogger(__name__)
 if not logger.handlers:
@@ -57,7 +57,6 @@ def get_arl_field_value(card_el: WebElement, label_text_exact: str, section_clas
         
         if not section: return "N/A"
 
-        # Extract value based on the field's nature
         if field_nature == "date":
             date_element = section.find_element(By.TAG_NAME, "lightning-formatted-date-time")
             raw_date_str = date_element.text.strip()
@@ -165,7 +164,6 @@ if __name__ == "__main__":
     
     service_test = ChromeService(ChromeDriverManager().install())
     test_options = Options()
-    # test_options.add_argument("--headless=new") 
     test_options.add_argument("--start-maximized")
 
     test_driver_standalone = None
@@ -176,7 +174,6 @@ if __name__ == "__main__":
 
     if test_driver_standalone:
         try:
-            # Call the updated function
             arl_opps_results_test = fetch_arl_opportunities(
                 driver_instance=test_driver_standalone,
                 max_items_arg=5

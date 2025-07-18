@@ -1,4 +1,5 @@
 # grantsgov_module.py
+
 import time
 import logging
 from bs4 import BeautifulSoup, Tag
@@ -70,7 +71,7 @@ def fetch_grantsgov_opportunities(driver: WebDriver) -> list:
                 driver.execute_script("arguments[0].scrollIntoView(true);", load_more_button)
                 time.sleep(1)
                 load_more_button.click()
-                time.sleep(3) # Wait for new content to load
+                time.sleep(3)
             except Exception:
                 logger.info(f"[{module_name}] No more 'Load more' button found or it failed to click. Processing results found so far.")
                 break
@@ -98,7 +99,6 @@ def fetch_grantsgov_opportunities(driver: WebDriver) -> list:
 
                 status = meta_dict.get('status', '').lower()
 
-                # Only collect opportunities that are currently posted
                 if "posted" not in status:
                     continue
 
@@ -144,7 +144,6 @@ if __name__ == '__main__':
 
     if standalone_driver_grants:
         try:
-            # Call the updated function
             test_opportunities = fetch_grantsgov_opportunities(driver=standalone_driver_grants)
             if test_opportunities:
                 logger.info(f"\n--- Scraped {len(test_opportunities)} Grants.gov Opportunities (Standalone Test) ---")

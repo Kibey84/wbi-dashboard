@@ -1,4 +1,5 @@
 # iarpa_scraper.py
+
 import time
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -21,13 +22,9 @@ def fetch_iarpa_opportunities(driver):
     opportunities = []
 
     try:
-        # Wait for the main content area to load.
-        # This selector targets the container that holds the list of BAAs.
         wait = WebDriverWait(driver, 20)
         content_area = wait.until(EC.visibility_of_element_located((By.ID, "dnn_ctr497_View_ScopeWrapper")))
 
-        # Find all individual opportunity blocks.
-        # This selector is a guess based on common page structures. It might need refinement.
         baa_blocks = content_area.find_elements(By.TAG_NAME, "article")
         
         if not baa_blocks:
@@ -39,7 +36,6 @@ def fetch_iarpa_opportunities(driver):
         for block in baa_blocks:
             try:
                 # --- Extract Title ---
-                # Titles are usually in a heading tag like h2 or h3.
                 title_element = block.find_element(By.TAG_NAME, "h2")
                 title = title_element.text.strip()
 
@@ -48,13 +44,10 @@ def fetch_iarpa_opportunities(driver):
                 link_url = link_element.get_attribute('href')
 
                 # --- Extract Description ---
-                # Descriptions are often in a <p> tag within the block.
                 description_element = block.find_element(By.TAG_NAME, "p")
                 description = description_element.text.strip()
                 
                 # --- Extract Dates (if available) ---
-                # This is highly speculative as the structure for dates isn't clear.
-                # We'll set a placeholder for now.
                 close_date = "See BAA for details"
 
                 opp = {
@@ -69,7 +62,7 @@ def fetch_iarpa_opportunities(driver):
 
             except Exception as e:
                 logging.warning(f"Could not scrape an individual IARPA block: {e}")
-                continue # Move to the next block if one fails
+                continue 
 
     except Exception as e:
         logging.error(f"Failed to scrape the main IARPA page: {e}", exc_info=True)

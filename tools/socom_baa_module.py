@@ -1,4 +1,5 @@
 # socom_baa_module.py
+
 import logging
 import time
 from datetime import datetime
@@ -50,7 +51,7 @@ def fetch_socom_opportunities(driver: WebDriver, max_items_from_wbiops: Optional
         
         WebDriverWait(driver, 30).until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, wait_selector)))
         module_logger.info("Table rows appear to be rendered.")
-        time.sleep(2) # Allow extra time for any final rendering
+        time.sleep(2) 
 
         soup = BeautifulSoup(driver.page_source, "html.parser")
         
@@ -139,11 +140,9 @@ if __name__ == "__main__":
     test_driver = None
     try:
         options = ChromeOptionsStandalone()
-        # options.add_argument("--headless=new")
         options.add_argument(f"user-agent={DEFAULT_HEADERS['User-Agent']}")
         test_driver = webdriver.Chrome(options=options)
 
-        # Call the updated function without keyword arguments
         opportunities = fetch_socom_opportunities(
             driver=test_driver,
             max_items_from_wbiops=5
