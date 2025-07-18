@@ -108,19 +108,24 @@ def load_scraper_config():
     try:
         with open(CONFIG_FILE, 'r') as f:
             config = json.load(f)
+
         valid_scrapers = []
         for scraper in config.get('scrapers', []):
-            module = sys.modules.get(__name__)
             function_name = scraper.get('function')
-            if module and function_name and hasattr(module, function_name):
-                scraper['function'] = getattr(module, function_name)
+            if not function_name:
+                logging.warning(f"Scraper '{scraper.get('name')}' is missing a 'function' name in config.json. Skipping.")
+                continue
+
+            if hasattr(sys.modules[__name__], function_name):
+                scraper['function'] = getattr(sys.modules[__name__], function_name)
                 valid_scrapers.append(scraper)
             else:
                 logging.warning(f"Could not find function '{function_name}' for scraper '{scraper.get('name')}'. Skipping.")
+
         return valid_scrapers
     except Exception as e:
         logging.error(f"FATAL: Could not load or parse '{CONFIG_FILE}': {e}", exc_info=True)
-        raise e
+        return []
 
 def create_driver(headless_mode=True):
     options = Options()
