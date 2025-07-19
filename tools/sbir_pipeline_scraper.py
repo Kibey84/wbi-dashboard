@@ -5,9 +5,9 @@ import pandas as pd
 import asyncio
 
 try:
-    import sbir  
-    import phase2  
-    import grading  
+    import tools.sbir as sbir
+    import tools.phase2 as phase2
+    import tools.grading as grading
 except ImportError as e:
     logging.error(f"SBIR Pipeline: Could not import a phase script. {e}")
 
