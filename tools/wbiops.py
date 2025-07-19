@@ -41,7 +41,7 @@ from azure.ai.inference.aio import ChatCompletionsClient
 from azure.ai.inference.models import SystemMessage, UserMessage
 from azure.core.credentials import AzureKeyCredential
 
-TESTING_MODE = True
+TESTING_MODE = False
 
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), "samgovkey.env"))
 
