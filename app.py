@@ -35,10 +35,7 @@ def run_pipeline_logic():
     opps_filename, match_filename = None, None
     try:
         result = wbiops.run_wbi_pipeline(log)
-        if result:
-            opps_df, matchmaking_df = result
-        else:
-            opps_df, matchmaking_df = pd.DataFrame(), pd.DataFrame()
+        opps_df, matchmaking_df = result if result else (pd.DataFrame(), pd.DataFrame())
 
         if not opps_df.empty:
             opps_filename = f"Opportunity_Report_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.xlsx"
@@ -56,9 +53,7 @@ def run_pipeline_logic():
 
 def get_unique_pms():
     df, error = load_project_data()
-    if error or df.empty:
-        return []
-    return sorted(df['pm'].dropna().unique().tolist())
+    return sorted(df['pm'].dropna().unique().tolist()) if not error and not df.empty else []
 
 def load_project_data():
     connect_str = os.getenv('AZURE_STORAGE_CONNECTION_STRING')
@@ -128,16 +123,12 @@ def api_run_pipeline():
 
 @app.route('/api/parse-org-chart', methods=['POST'])
 def api_parse_org_chart():
-    if 'file' not in request.files:
+    if 'file' not in request.files or not request.files['file'].filename:
         return jsonify({"error": "No file provided"}), 400
     file = request.files['file']
-    if file.filename == '':
-        return jsonify({"error": "Empty filename"}), 400
     try:
         output_filename = org_chart_parser.process_uploaded_pdf(file, REPORTS_DIR)
-        if output_filename:
-            return jsonify({"success": True, "filename": output_filename})
-        return jsonify({"error": "Processing failed"}), 500
+        return jsonify({"success": True, "filename": output_filename}) if output_filename else jsonify({"error": "Processing failed"}), 500
     except Exception:
         return jsonify({"error": "Internal server error"}), 500
 
@@ -148,12 +139,8 @@ def api_get_pms():
 @app.route('/api/projects')
 def api_get_projects():
     pm_name = request.args.get('pm')
-    if not pm_name:
-        return jsonify([])
     projects_df, error = load_project_data()
-    if error:
-        return jsonify([])
-    return jsonify(projects_df[projects_df['pm'] == pm_name].to_dict(orient='records'))
+    return jsonify(projects_df[projects_df['pm'] == pm_name].to_dict(orient='records')) if pm_name and not error else jsonify([])
 
 @app.route('/api/get_update')
 def api_get_update():
@@ -161,11 +148,10 @@ def api_get_update():
     month = request.args.get('month')
     year_str = request.args.get('year')
 
-    if not project_name or not month or not year_str or not year_str.isdigit():
+    if not project_name or not month or not (year_str and year_str.isdigit()):
         return jsonify({})
 
-    year = int(year_str)
-
+    year = int(year_str) if year_str else 0
     connect_str = os.getenv('AZURE_STORAGE_CONNECTION_STRING')
     if not connect_str:
         logging.error("Azure Storage connection string missing.")
@@ -174,23 +160,18 @@ def api_get_update():
     try:
         blob_service_client = BlobServiceClient.from_connection_string(connect_str)
         blob_client = blob_service_client.get_blob_client(BLOB_CONTAINER_NAME, UPDATES_FILE)
-
         if not blob_client.exists():
             return jsonify({})
-
         with io.BytesIO() as stream:
             blob_client.download_blob().readinto(stream)
             stream.seek(0)
             updates_df = pd.read_csv(stream)
-
         updates_df['year'] = updates_df['year'].astype(int)
-
         update = updates_df[
             (updates_df['projectName'] == project_name) &
             (updates_df['month'] == month) &
             (updates_df['year'] == year)
         ]
-
         return jsonify(update.iloc[0].to_dict()) if not update.empty else jsonify({})
     except Exception as e:
         logging.error(f"Error retrieving update: {e}")
@@ -205,7 +186,7 @@ def api_update_project():
     if not all(field in data for field in required_fields):
         return jsonify({"success": False, "error": "Missing fields"}), 400
     try:
-        year = int(data['year'])
+        year = int(data['year']) if data.get('year') else 0
     except ValueError:
         return jsonify({"success": False, "error": "Invalid year"}), 400
     ai_summary = get_improved_ai_summary(data.get('description', ''), data['managerUpdate'])
