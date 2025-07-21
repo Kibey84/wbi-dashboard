@@ -19,7 +19,6 @@ from .arpah_module import fetch_arpah_opportunities
 from .eureka_module import fetch_eureka_opportunities
 from .nsin_module import fetch_nsin_opportunities
 from .nih_sbir_module import fetch_nih_sbir_opportunities
-from .tradewinds_module import fetch_tradewinds_opportunities
 from .nstxl_module import fetch_nstxl_opportunities
 from .mtec_module import fetch_mtec_opportunities
 from .afwerx_module import fetch_afwerx_opportunities
@@ -32,6 +31,7 @@ from .osti_foa_module import fetch_osti_foas
 from .arpae_scraper import fetch_arpae_opportunities
 from .iarpa_scraper import fetch_iarpa_opportunities
 from .sbir_pipeline_scraper import fetch_sbir_partnership_opportunities
+from .sam_gov_api_module import fetch_sam_gov_opportunities
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options

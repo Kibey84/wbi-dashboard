@@ -1,70 +1,57 @@
-# arpae_scraper.py
-
-import time
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+import requests
+from bs4 import BeautifulSoup
 import logging
+from datetime import datetime
 
-def fetch_arpae_opportunities(driver, url_to_scrape):
+def fetch_arpae_opportunities(url_to_scrape):
     """
-    Scrapes a specific Funding Opportunity Announcement (FOA) from the ARPA-E portal.
-
-    Args:
-        driver: An instance of the Selenium WebDriver.
-        url_to_scrape: The direct URL to the ARPA-E FOA.
-
-    Returns:
-        A list containing a dictionary with the scraped opportunity details.
+    Scrapes a specific Funding Opportunity Announcement (FOA) from the ARPA-E portal using HTTP requests.
     """
-    logging.info(f"Navigating to ARPA-E opportunity: {url_to_scrape}")
-    driver.get(url_to_scrape)
+    logging.info(f"Fetching ARPA-E opportunity: {url_to_scrape}")
     opportunities = []
-    
-    try:
-        wait = WebDriverWait(driver, 20)
-        container = wait.until(EC.visibility_of_element_located((By.ID, "main")))
-        
-        try:
-            title_element = container.find_element(By.TAG_NAME, "h1")
-            title = title_element.text.strip()
-        except Exception as e:
-            logging.warning(f"Could not find title for ARPA-E opportunity: {e}")
-            title = "Title Not Found"
 
-        # --- Extract the Description ---
+    try:
+        response = requests.get(url_to_scrape, timeout=30)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        title = "Title Not Found"
         try:
-            description_elements = container.find_elements(By.XPATH, "//div[contains(@class, 'display-field')]/p")
-            description_parts = [p.text for p in description_elements if p.text.strip()]
-            description = "\n".join(description_parts)
-            if not description:
-                description = "Description not found."
+            title_element = soup.find('h1')
+            if title_element:
+                title = title_element.get_text(strip=True)
         except Exception as e:
-            logging.warning(f"Could not extract description for ARPA-E opportunity: {e}")
-            description = "Description extraction failed."
-            
-        # --- Extract Key Dates ---
+            logging.warning(f"Could not extract title: {e}")
+
+        description = "Description not found."
+        try:
+            description_elements = soup.select('div.display-field p')
+            description_parts = [p.get_text(strip=True) for p in description_elements if p.get_text(strip=True)]
+            if description_parts:
+                description = "\n".join(description_parts)
+        except Exception as e:
+            logging.warning(f"Could not extract description: {e}")
+
         close_date = "Not Found"
         try:
-            date_items = driver.find_elements(By.XPATH, "//div[contains(@class, 'foa-view-detail-value')]")
-            if len(date_items) > 1:
-                close_date = date_items[-2].text.strip()
+            date_elements = soup.select('div.foa-view-detail-value')
+            if len(date_elements) > 1:
+                close_date = date_elements[-2].get_text(strip=True)
         except Exception as e:
-            logging.warning(f"Could not find close date for ARPA-E opportunity: {e}")
+            logging.warning(f"Could not extract close date: {e}")
 
-
-        logging.info(f"Successfully scraped ARPA-E opportunity: {title[:50]}...")
-        
         opp = {
             'Title': title,
             'Description': description,
             'URL': url_to_scrape,
             'Close Date': close_date,
+            'ScrapedDate': datetime.now().isoformat(),
             'Source': 'ARPA-E'
         }
         opportunities.append(opp)
+        logging.info(f"✅ Scraped ARPA-E opportunity: {title[:50]}...")
 
     except Exception as e:
-        logging.error(f"Failed to scrape the ARPA-E page at {url_to_scrape}: {e}", exc_info=True)
+        logging.error(f"Failed to fetch ARPA-E opportunity at {url_to_scrape}: {e}", exc_info=True)
 
     return opportunities

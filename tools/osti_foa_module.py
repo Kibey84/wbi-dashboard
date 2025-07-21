@@ -9,6 +9,7 @@ from datetime import datetime
 import re
 import json
 from typing import Optional
+from typing import Optional, Dict
 
 # --- Logger Setup ---
 logger = logging.getLogger(__name__)
@@ -68,7 +69,7 @@ def _parse_osti_date(date_text_str: str, module_name_for_log="OSTI FOA") -> str:
     logger.error(f"[{module_name_for_log}] Failed to parse extracted date: '{string_to_parse}'")
     return "N/A (Parsing Failed)"
 
-def fetch_osti_foas(headers_to_use: Optional[dict[str, str]] = None, max_items: Optional[int] = None) -> list:
+def fetch_osti_foas(headers_to_use: Optional[Dict[str, str]] = None, max_items: Optional[int] = None) -> list:
     """
     Fetches and parses Funding Opportunity Announcements (FOAs) from the OSTI website.
     This version scrapes all opportunities without keyword filtering.

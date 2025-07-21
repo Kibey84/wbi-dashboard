@@ -1,70 +1,62 @@
-# iarpa_scraper.py
-
-import time
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+import requests
+from bs4 import BeautifulSoup, Tag
 import logging
+from datetime import datetime
 
-def fetch_iarpa_opportunities(driver):
-    """
-    Scrapes the main IARPA Open BAA page for all listed opportunities.
-
-    Args:
-        driver: An instance of the Selenium WebDriver.
-
-    Returns:
-        A list of dictionaries, where each dictionary is a scraped opportunity.
-    """
+def fetch_iarpa_opportunities():
     url = "https://www.iarpa.gov/engage-with-us/open-baas"
-    logging.info(f"Navigating to IARPA Open BAAs page: {url}")
-    driver.get(url)
+    logging.info(f"Fetching IARPA Open BAAs page: {url}")
     opportunities = []
 
     try:
-        wait = WebDriverWait(driver, 20)
-        content_area = wait.until(EC.visibility_of_element_located((By.ID, "dnn_ctr497_View_ScopeWrapper")))
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
 
-        baa_blocks = content_area.find_elements(By.TAG_NAME, "article")
-        
-        if not baa_blocks:
-            logging.info("No active IARPA BAA blocks found on the page.")
+        content_area = soup.find(id="dnn_ctr497_View_ScopeWrapper")
+        if not isinstance(content_area, Tag):
+            logging.warning("IARPA content area not found or wrong type.")
             return []
 
-        logging.info(f"Found {len(baa_blocks)} IARPA opportunity blocks. Scraping each one.")
+        baa_blocks = content_area.find_all("article")
+        logging.info(f"Found {len(baa_blocks)} BAA blocks.")
 
         for block in baa_blocks:
-            try:
-                # --- Extract Title ---
-                title_element = block.find_element(By.TAG_NAME, "h2")
-                title = title_element.text.strip()
+            if not isinstance(block, Tag):
+                continue
 
-                # --- Extract URL ---
-                link_element = title_element.find_element(By.TAG_NAME, "a")
-                link_url = link_element.get_attribute('href')
+            title_element = block.find("h2")
+            title = title_element.get_text(strip=True) if isinstance(title_element, Tag) else "No Title Found"
 
-                # --- Extract Description ---
-                description_element = block.find_element(By.TAG_NAME, "p")
-                description = description_element.text.strip()
-                
-                # --- Extract Dates (if available) ---
-                close_date = "See BAA for details"
+            link_element = title_element.find("a") if isinstance(title_element, Tag) else None
+            link_url = (
+                str(link_element["href"]).strip()
+                if isinstance(link_element, Tag) and link_element.has_attr("href")
+                else "No Link Found"
+            )
 
-                opp = {
-                    'Title': title,
-                    'Description': description,
-                    'URL': link_url,
-                    'Close Date': close_date,
-                    'Source': 'IARPA'
-                }
-                opportunities.append(opp)
-                logging.info(f"Successfully scraped IARPA BAA: {title}")
+            desc_element = block.find("p")
+            description = desc_element.get_text(strip=True) if isinstance(desc_element, Tag) else "No Description Found"
 
-            except Exception as e:
-                logging.warning(f"Could not scrape an individual IARPA block: {e}")
-                continue 
+            opportunities.append({
+                "Title": title,
+                "Description": description,
+                "URL": link_url,
+                "Close Date": "See BAA for details",
+                "Source": "IARPA",
+                "ScrapedDate": datetime.now().strftime("%Y-%m-%d")
+            })
+            logging.info(f"✅ Scraped IARPA BAA: {title}")
 
     except Exception as e:
-        logging.error(f"Failed to scrape the main IARPA page: {e}", exc_info=True)
+        logging.error(f"Failed to fetch IARPA page: {e}", exc_info=True)
 
     return opportunities
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+    data = fetch_iarpa_opportunities()
+    print(f"\n--- Scraped {len(data)} IARPA Opportunities ---")
+    for item in data:
+        print(item)

@@ -71,16 +71,19 @@
     {
       "name": "NIH SBIR",
       "function": "fetch_nih_sbir_opportunities",
-      "requires_driver": true,
-      "driver_param_name": "driver",
-      "args": {}
+      "requires_driver": false,
+      "args": {
+        "headers_to_use": "HEADERS",
+        "max_items": 20
+      }
     },
     {
-      "name": "Tradewinds",
-      "function": "fetch_tradewinds_opportunities",
-      "requires_driver": true,
-      "driver_param_name": "driver",
-      "args": {}
+      "name": "SAM.gov",
+      "function": "fetch_sam_gov_opportunities",
+      "requires_driver": false,
+      "args": {
+        "api_key": "YOUR_SAM_API_KEY"
+      }
     },
     {
       "name": "NSTXL",
@@ -102,13 +105,6 @@
       "name": "AFWERX",
       "function": "fetch_afwerx_opportunities",
       "requires_driver": true,
-      "driver_param_name": "driver_instance",
-      "args": {}
-    },
-    {
-      "name": "Grants.gov",
-      "function": "fetch_grantsgov_opportunities",
-      "requires_driver": true,
       "driver_param_name": "driver",
       "args": {}
     },
@@ -116,7 +112,7 @@
       "name": "ARL Opportunities",
       "function": "fetch_arl_opportunities",
       "requires_driver": true,
-      "driver_param_name": "driver_instance",
+      "driver_param_name": "driver",
       "args": {
         "max_items_arg": 20
       }
@@ -125,7 +121,7 @@
       "name": "DIU",
       "function": "fetch_diu_opportunities",
       "requires_driver": true,
-      "driver_param_name": "driver_instance",
+      "driver_param_name": "driver",
       "args": {}
     },
     {

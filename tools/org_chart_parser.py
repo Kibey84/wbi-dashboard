@@ -8,6 +8,7 @@ from azure.ai.inference.aio import ChatCompletionsClient
 from azure.ai.inference.models import SystemMessage, UserMessage
 from azure.core.credentials import AzureKeyCredential
 import asyncio
+from typing import Optional
 
 # === Load Environment Variables ===
 load_dotenv("samgovkey.env")
@@ -90,7 +91,7 @@ def save_and_format_excel(df: pd.DataFrame, output_directory: str, output_filena
     print(f"[Excel Output] Saved file at {full_path}")
 
 # === PDF Processing ===
-def process_uploaded_pdf(uploaded_file, output_directory: str) -> str | None:
+def process_uploaded_pdf(uploaded_file, output_directory: str) -> Optional[str]:
     try:
         pdf_bytes = uploaded_file.read()
         with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:

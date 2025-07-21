@@ -1,74 +1,75 @@
-# diu_scraper.py
-
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+import requests
+from bs4 import BeautifulSoup, Tag
 from datetime import datetime
-import time
 import logging
+from bs4 import Tag
 
-def fetch_diu_opportunities(driver_instance):
-    """
-    Scrapes the DIU "Current Solicitations" page for open opportunities.
-    
-    Args:
-        driver_instance: An active Selenium WebDriver instance.
-        
-    Returns:
-        A list of dictionaries, where each dictionary is an opportunity.
-    """
+def fetch_diu_opportunities():
     url = "https://www.diu.mil/work-with-us/open-solicitations"
-    logging.info(f"Navigating to DIU opportunities page: {url}")
-    driver_instance.get(url)
+    logging.info(f"Fetching DIU opportunities from {url}")
     opportunities = []
 
     try:
-        wait = WebDriverWait(driver_instance, 20)
-        solicitations_container = wait.until(
-            EC.visibility_of_element_located((By.CSS_SELECTOR, "div.usa-accordion"))
-        )
-        
-        solicitation_buttons = solicitations_container.find_elements(By.CSS_SELECTOR, "button.usa-accordion__button")
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
 
-        if not solicitation_buttons:
-            logging.info("No open solicitations found on the DIU page.")
-            return []
+        accordion_headers = soup.select("div.usa-accordion h4.usa-accordion__heading")
+        logging.info(f"Found {len(accordion_headers)} DIU solicitation headers.")
 
-        logging.info(f"Found {len(solicitation_buttons)} DIU solicitations.")
-
-        for button in solicitation_buttons:
+        for header in accordion_headers:
             try:
-                title = button.text.strip()
-                
-                content_div = button.find_element(By.XPATH, "./parent::h4/following-sibling::div")
-                
-                description_paragraphs = content_div.find_elements(By.TAG_NAME, "p")
-                description = "\n".join([p.text for p in description_paragraphs])
-                
-                link_element = content_div.find_element(By.PARTIAL_LINK_TEXT, "Submit a Solution")
-                link_url = link_element.get_attribute('href')
-                
-                close_date_text = ""
-                for p in description_paragraphs:
-                    if "Submissions are due by" in p.text:
-                        close_date_text = p.text.split("Submissions are due by")[1].split("at")[0].strip()
+                title = header.get_text(strip=True)
+                # Ensure we only proceed if the next element is a Tag
+                next_sibling = header.find_next_sibling()
+                if not isinstance(next_sibling, Tag):
+                    logging.warning(f"No valid content found for '{title}'. Skipping.")
+                    continue
+
+                paragraphs = next_sibling.find_all("p")
+                description = "\n".join(p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True))
+
+                # Find the submission link by looping manually
+                link_url = "No Submission Link Found"
+                for a_tag in next_sibling.find_all("a"):
+                    if not isinstance(a_tag, Tag):
+                        continue
+                    if "Submit a Solution" in a_tag.get_text():
+                        if a_tag.has_attr("href"):
+                            link_url = a_tag["href"]
                         break
-                
-                opp = {
-                    'Title': title,
-                    'Description': description,
-                    'URL': link_url,
-                    'Close Date': close_date_text if close_date_text else "See Description",
-                    'ScrapedDate': datetime.now().strftime('%Y-%m-%d')
-                }
-                opportunities.append(opp)
-                logging.info(f"Successfully scraped DIU opportunity: {title}")
-                
+
+                # Look for the close date in the paragraphs
+                close_date_text = "See Description"
+                for p in paragraphs:
+                    p_text = p.get_text()
+                    if "Submissions are due by" in p_text:
+                        parts = p_text.split("Submissions are due by")
+                        if len(parts) > 1:
+                            close_date_text = parts[1].split("at")[0].strip()
+                        break
+
+                opportunities.append({
+                    "Title": title,
+                    "Description": description,
+                    "URL": link_url,
+                    "Close Date": close_date_text,
+                    "ScrapedDate": datetime.now().strftime("%Y-%m-%d")
+                })
+
+                logging.info(f"✅ Scraped DIU opportunity: {title}")
+
             except Exception as e:
-                logging.warning(f"Could not parse a DIU solicitation block: {e}")
-                continue
+                logging.warning(f"Error parsing solicitation '{title}': {e}")
 
     except Exception as e:
-        logging.error(f"Failed to scrape the DIU page: {e}", exc_info=True)
-        
+        logging.error(f"Failed to fetch DIU page: {e}", exc_info=True)
+
     return opportunities
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+    scraped = fetch_diu_opportunities()
+    print(f"\n--- Scraped {len(scraped)} DIU Opportunities ---")
+    for opp in scraped:
+        print(opp)

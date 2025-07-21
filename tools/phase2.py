@@ -21,6 +21,9 @@ AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
 AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY")
 AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT")
 
+if not (AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_KEY and AZURE_OPENAI_DEPLOYMENT):
+    raise EnvironmentError("Azure OpenAI ENV variables missing.")
+
 INPUT_FILENAME = "Discovered Companies.xlsx"
 OUTPUT_FOLDER = "company_dossiers"
 LOG_FILENAME = "sbir_research_log.txt"

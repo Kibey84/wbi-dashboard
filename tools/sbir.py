@@ -10,7 +10,7 @@ CURRENT_YEAR = datetime.now().year
 OUTPUT_FILENAME = "Discovered Companies.xlsx"
 LOG_FILENAME = "sbir_tool_log.txt"
 
-def fetch_awards_by_year(start_year):
+def fetch_awards_by_year(start_year: int) -> list[dict]:
     """
     Fetches all Phase II DoD SBIR award data from the SBIR.gov API.
     Now starts from the specified start_year instead of a hardcoded one.
@@ -54,7 +54,7 @@ def fetch_awards_by_year(start_year):
             
     return all_awards
 
-def process_and_save_data(data, filename):
+def process_and_save_data(data: list[dict], filename: str) -> None:
     """
     Processes the raw award data and saves it to a formatted Excel file.
     (This function remains the same as the last corrected version)
