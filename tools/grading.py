@@ -6,7 +6,7 @@ import asyncio
 import json
 from datetime import datetime
 from dotenv import load_dotenv
-import re  # FIX 1: Added the missing 're' import
+import re  
 
 # Document and file handling imports
 from docx import Document

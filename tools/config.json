@@ -21,51 +21,45 @@
     {
       "name": "NSIN Events",
       "function": "fetch_nsin_opportunities",
-      "requires_driver": true,
-      "driver_param_name": "driver",
+      "requires_driver": false,
       "args": {
-        "headers": "HEADERS"
+        "headers_to_use": "HEADERS"
       }
     },
     {
       "name": "DoD SBIR/STTR",
       "function": "fetch_dod_sbir_sttr_topics",
-      "requires_driver": true,
-      "driver_param_name": "driver",
+      "requires_driver": false,
       "args": {}
     },
     {
       "name": "NASA SBIR/STTR",
       "function": "fetch_nasa_sbir_opportunities",
-      "requires_driver": true,
-      "driver_param_name": "driver",
+      "requires_driver": false,
       "args": {
-        "headers": "HEADERS"
+        "headers_to_use": "HEADERS"
       }
     },
     {
       "name": "DARPA",
       "function": "fetch_darpa_opportunities",
-      "requires_driver": true,
-      "driver_param_name": "driver",
+      "requires_driver": false,
       "args": {
-        "headers": "HEADERS"
+        "headers_to_use": "HEADERS"
       }
     },
     {
       "name": "ARPA-H",
       "function": "fetch_arpah_opportunities",
-      "requires_driver": true,
-      "driver_param_name": "driver",
+      "requires_driver": false,
       "args": {
-        "headers": "HEADERS"
+        "headers_to_use": "HEADERS"
       }
     },
     {
       "name": "EUREKA",
       "function": "fetch_eureka_opportunities",
-      "requires_driver": true,
-      "driver_param_name": "driver",
+      "requires_driver": false,
       "args": {}
     },
     {
@@ -88,31 +82,27 @@
     {
       "name": "NSTXL",
       "function": "fetch_nstxl_opportunities",
-      "requires_driver": true,
-      "driver_param_name": "driver",
+      "requires_driver": false,
       "args": {}
     },
     {
       "name": "MTEC",
       "function": "fetch_mtec_opportunities",
-      "requires_driver": true,
-      "driver_param_name": "driver",
+      "requires_driver": false,
       "args": {
-        "headers": "HEADERS"
+        "headers_to_use": "HEADERS"
       }
     },
     {
       "name": "AFWERX",
       "function": "fetch_afwerx_opportunities",
-      "requires_driver": true,
-      "driver_param_name": "driver",
+      "requires_driver": false,
       "args": {}
     },
     {
       "name": "ARL Opportunities",
       "function": "fetch_arl_opportunities",
-      "requires_driver": true,
-      "driver_param_name": "driver",
+      "requires_driver": false,
       "args": {
         "max_items_arg": 20
       }
@@ -120,15 +110,13 @@
     {
       "name": "DIU",
       "function": "fetch_diu_opportunities",
-      "requires_driver": true,
-      "driver_param_name": "driver",
+      "requires_driver": false,
       "args": {}
     },
     {
       "name": "SOCOM BAA",
       "function": "fetch_socom_opportunities",
-      "requires_driver": true,
-      "driver_param_name": "driver",
+      "requires_driver": false,
       "args": {
         "max_items_from_wbiops": 20
       }
@@ -136,15 +124,13 @@
     {
       "name": "IARPA",
       "function": "fetch_iarpa_opportunities",
-      "requires_driver": true,
-      "driver_param_name": "driver",
+      "requires_driver": false,
       "args": {}
     },
     {
       "name": "ARPA-E",
       "function": "fetch_arpae_opportunities",
-      "requires_driver": true,
-      "driver_param_name": "driver",
+      "requires_driver": false,
       "args": {
         "url_to_scrape": "https://arpa-e-foa.energy.gov/#FoaIdda84547f-8f17-4321-bc46-d717314a28b8"
       }

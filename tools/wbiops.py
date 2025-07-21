@@ -31,9 +31,6 @@ from .iarpa_scraper import fetch_iarpa_opportunities
 from .sbir_pipeline_scraper import fetch_sbir_partnership_opportunities
 from .sam_gov_api_module import fetch_sam_gov_opportunities
 
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-
 from azure.ai.inference.aio import ChatCompletionsClient
 from azure.ai.inference.models import SystemMessage, UserMessage
 from azure.core.credentials import AzureKeyCredential
@@ -92,27 +89,10 @@ def load_scraper_config():
             valid.append(scraper)
     return valid
 
-def create_driver(headless=True):
-    options = Options()
-    if headless:
-        options.add_argument('--headless=new')
-    options.add_argument('--no-sandbox')
-    options.add_argument('--disable-dev-shm-usage')
-    options.add_argument('--disable-gpu')
-    options.add_argument(f'user-agent={HEADERS["User-Agent"]}')
-    return webdriver.Chrome(options=options)
-
 def run_scraper_task(scraper_config):
     name = scraper_config['name']
-    driver = None
     try:
         kwargs = {arg: HEADERS if val == "HEADERS" else val for arg, val in scraper_config.get('args', {}).items()}
-        if scraper_config.get('requires_driver'):
-            driver = create_driver()
-            if not driver:
-                raise RuntimeError(f"Failed to initialize driver for {name}")
-            driver_param = scraper_config.get('driver_param_name', 'driver')
-            kwargs[driver_param] = driver
         if name == "SBIR Partnerships":
             kwargs['testing_mode'] = TESTING_MODE
         data = scraper_config['function'](**kwargs)
@@ -122,9 +102,6 @@ def run_scraper_task(scraper_config):
     except Exception as e:
         logging.error(f"Scraper failed for {name}: {e}", exc_info=True)
         return [], e
-    finally:
-        if driver:
-            driver.quit()
 
 async def call_azure_ai_async(system_prompt, user_prompt):
     endpoint = os.getenv("AZURE_AI_ENDPOINT")
