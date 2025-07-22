@@ -135,8 +135,13 @@ def analyze_opportunity_with_ai(opportunity, knowledge):
     OPPORTUNITY TEXT: --- {text} ---
     TASK: Analyze this opportunity for relevance to WBI. Reply ONLY with JSON having keys: "relevance_score", "justification", "related_experience", "funding_assessment", "suggested_internal_lead".
     """
-    loop = asyncio.get_event_loop()
-    response = loop.run_until_complete(call_azure_ai_async(system_prompt, user_prompt))
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        response = loop.run_until_complete(call_azure_ai_async(system_prompt, user_prompt))
+    finally:
+        loop.close()
+
     if not response:
         return {"relevance_score": 0}
     try:
@@ -157,8 +162,13 @@ def find_partners_with_ai(opportunity, partners, knowledge):
     PARTNERS: --- {partners_text} ---
     TASK: Recommend up to 3 partners as JSON: {{ "suggested_partners": [{{"partner_company": "", "reasoning": ""}}] }}
     """
-    loop = asyncio.get_event_loop()
-    response = loop.run_until_complete(call_azure_ai_async(system_prompt, user_prompt))
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        response = loop.run_until_complete(call_azure_ai_async(system_prompt, user_prompt))
+    finally:
+        loop.close()
+
     if not response:
         return []
     try:

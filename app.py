@@ -113,8 +113,14 @@ def get_improved_ai_summary(description, update):
             return None
 
     try:
-        return asyncio.run(call_azure_ai())
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            future = asyncio.ensure_future(call_azure_ai())
+            return asyncio.get_event_loop().run_until_complete(future)
+        else:
+            return loop.run_until_complete(call_azure_ai())
     except Exception as e:
+        logging.error(f"Error running AI summary: {e}")
         return f"Error running AI summary: {e}"
 
 @app.route('/api/run-pipeline', methods=['POST'])

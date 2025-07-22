@@ -5,7 +5,7 @@
       "function": "fetch_nasc_opportunities",
       "requires_driver": false,
       "args": {
-        "headers_to_use": "HEADERS",
+        "headers": "HEADERS",
         "max_cards_to_process": 20
       }
     },
@@ -14,7 +14,7 @@
       "function": "fetch_osti_foas",
       "requires_driver": false,
       "args": {
-        "headers_to_use": "HEADERS",
+        "headers": "HEADERS",
         "max_items": 20
       }
     },
@@ -23,7 +23,7 @@
       "function": "fetch_nsin_opportunities",
       "requires_driver": false,
       "args": {
-        "headers_to_use": "HEADERS"
+        "headers": "HEADERS"
       }
     },
     {
@@ -37,7 +37,7 @@
       "function": "fetch_nasa_sbir_opportunities",
       "requires_driver": false,
       "args": {
-        "headers_to_use": "HEADERS"
+        "headers": "HEADERS"
       }
     },
     {
@@ -45,7 +45,7 @@
       "function": "fetch_darpa_opportunities",
       "requires_driver": false,
       "args": {
-        "headers_to_use": "HEADERS"
+        "headers": "HEADERS"
       }
     },
     {
@@ -53,7 +53,7 @@
       "function": "fetch_arpah_opportunities",
       "requires_driver": false,
       "args": {
-        "headers_to_use": "HEADERS"
+        "headers": "HEADERS"
       }
     },
     {
@@ -67,7 +67,7 @@
       "function": "fetch_nih_sbir_opportunities",
       "requires_driver": false,
       "args": {
-        "headers_to_use": "HEADERS",
+        "headers": "HEADERS",
         "max_items": 20
       }
     },
@@ -90,7 +90,7 @@
       "function": "fetch_mtec_opportunities",
       "requires_driver": false,
       "args": {
-        "headers_to_use": "HEADERS"
+        "headers": "HEADERS"
       }
     },
     {
@@ -104,7 +104,7 @@
       "function": "fetch_arl_opportunities",
       "requires_driver": false,
       "args": {
-        "max_items_arg": 20
+        "max_items": 20
       }
     },
     {
@@ -118,7 +118,7 @@
       "function": "fetch_socom_opportunities",
       "requires_driver": false,
       "args": {
-        "max_items_from_wbiops": 20
+        "max_items": 20
       }
     },
     {

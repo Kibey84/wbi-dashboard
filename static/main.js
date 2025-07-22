@@ -1,4 +1,16 @@
 document.addEventListener('DOMContentLoaded', () => {
+let dotsInterval;
+function startDots() {
+    const dots = document.getElementById('dotPulse');
+    let count = 0;
+    dotsInterval = setInterval(() => {
+        count = (count + 1) % 4;
+        dots.textContent = '.'.repeat(count);
+    }, 500);
+}
+function stopDots() {
+    clearInterval(dotsInterval);
+}
 
     // --- Universal Tab Switching Logic ---
     const tabs = document.querySelectorAll('.tab-button');
@@ -87,6 +99,7 @@ document.addEventListener('DOMContentLoaded', () => {
             formData.append('file', pdfUploadInput.files[0]);
             parseBtn.classList.add('hidden');
             parsingSpinner.classList.remove('hidden');
+            startDots();
             downloadSection.classList.add('hidden');
             try {
                 const response = await fetch('/api/parse-org-chart', { method: 'POST', body: formData });
@@ -100,6 +113,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 parseBtn.classList.remove('hidden');
             } finally {
                 parsingSpinner.classList.add('hidden');
+                stopDots();
             }
         });
     }

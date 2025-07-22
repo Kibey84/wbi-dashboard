@@ -63,7 +63,11 @@ TEXT TO PARSE:
 """
 
     try:
-        ai_response_text = asyncio.run(call_azure_ai(prompt))
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        ai_response_text = loop.run_until_complete(call_azure_ai(prompt))
+        loop.close()
+
         if not ai_response_text:
             print("[AI Error] No response received.")
             return pd.DataFrame()
