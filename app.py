@@ -6,6 +6,8 @@ import io
 import json
 import asyncio
 import logging
+import threading
+import uuid
 
 from tools import org_chart_parser
 from tools import wbiops
@@ -14,6 +16,10 @@ from azure.storage.blob import BlobServiceClient
 from azure.ai.inference.aio import ChatCompletionsClient
 from azure.ai.inference.models import SystemMessage, UserMessage
 from azure.core.credentials import AzureKeyCredential
+
+# Ensure environment variables for Azure services are set in your deployment configuration.
+# e.g., AZURE_STORAGE_CONNECTION_STRING, AZURE_AI_ENDPOINT, AZURE_AI_KEY
+print("Flask App Loaded. ENV:", os.environ.get("AZURE_STORAGE_CONNECTION_STRING"))
 
 basedir = os.path.abspath(os.path.dirname(__file__))
 app = Flask(__name__,
@@ -30,26 +36,48 @@ UPDATES_FILE = 'updates.csv'
 if not logging.getLogger().hasHandlers():
     logging.basicConfig(level=logging.INFO)
 
-def run_pipeline_logic():
-    log = [{"text": "✅ Pipeline Started"}]
-    opps_filename, match_filename = None, None
+# A dictionary to store the status of background pipeline jobs
+pipeline_jobs = {}
+
+def run_pipeline_logic(job_id):
+    """
+    This function runs the WBI pipeline in a background thread.
+    It updates the global `pipeline_jobs` dictionary with its status.
+    """
+    # Initialize job status
+    pipeline_jobs[job_id] = {
+        "status": "running",
+        "log": [{"text": "✅ Pipeline Started"}],
+        "opps_report_filename": None,
+        "match_report_filename": None
+    }
+    log = pipeline_jobs[job_id]["log"]
+
     try:
+        # Pass the log list to the pipeline function to append real-time updates
         result = wbiops.run_wbi_pipeline(log)
         opps_df, matchmaking_df = result if result else (pd.DataFrame(), pd.DataFrame())
 
         if not opps_df.empty:
             opps_filename = f"Opportunity_Report_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.xlsx"
             opps_df.to_excel(os.path.join(REPORTS_DIR, opps_filename), index=False)
+            pipeline_jobs[job_id]["opps_report_filename"] = opps_filename
             log.append({"text": f"📊 Primary Report Generated: {opps_filename}"})
 
         if not matchmaking_df.empty:
             match_filename = f"Strategic_Matchmaking_Report_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.xlsx"
             matchmaking_df.to_excel(os.path.join(REPORTS_DIR, match_filename), index=False)
+            pipeline_jobs[job_id]["match_report_filename"] = match_filename
             log.append({"text": f"🤝 Matchmaking Report Generated: {match_filename}"})
+
+        log.append({"text": "🎉 Run Complete!"})
+        pipeline_jobs[job_id]["status"] = "completed"
+
     except Exception as e:
+        logging.error(f"Pipeline job {job_id} failed: {e}")
         log.append({"text": f"❌ Critical Error: {e}"})
-    log.append({"text": "🎉 Run Complete!"})
-    return {"log": log, "opps_report_filename": opps_filename, "match_report_filename": match_filename}
+        pipeline_jobs[job_id]["status"] = "failed"
+
 
 def get_unique_pms():
     df, error = load_project_data()
@@ -87,45 +115,76 @@ def load_project_data():
     except Exception as e:
         return pd.DataFrame(), str(e)
 
+@app.route("/status")
+def status():
+    return "App is running"
+
 def get_improved_ai_summary(description, update):
-    endpoint = os.getenv("AZURE_AI_ENDPOINT")
-    key = os.getenv("AZURE_AI_KEY")
+    
+    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT") 
+    key = os.getenv("AZURE_OPENAI_KEY")           
+
     if not endpoint or not key or not update:
-        logging.error("Azure AI endpoint/key missing or no update provided.")
-        return "Azure AI not configured or no update provided."
+        logging.error("Azure OpenAI endpoint/key missing or no update provided.")
+        return "Azure OpenAI not configured or no update provided."
 
     system_prompt = "You are an expert Project Manager at WBI. Summarize the following project update."
     user_prompt = f"**Project Description:**\n{description}\n\n**Monthly Update:**\n{update}"
 
-    async def call_azure_ai():
+    async def call_azure_openai():
         try:
-            client = ChatCompletionsClient(endpoint=endpoint, credential=AzureKeyCredential(key))
-            response = await client.complete(
-                deployment_name="gpt-4",
+            
+            from openai import AsyncAzureOpenAI
+
+            client = AsyncAzureOpenAI(
+                azure_endpoint=endpoint,
+                api_key=key,
+                api_version="2025-01-01-preview"  
+            )
+
+            response = await client.chat.completions.create(
+                model="gpt-4",  
                 messages=[
-                    SystemMessage(content=system_prompt),
-                    UserMessage(content=user_prompt)
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
                 ]
             )
-            return response.choices[0].message.content.strip()
+            
+            message_content = response.choices[0].message.content
+            if message_content:
+                return message_content.strip()
+            
+            return "" # Return an empty string if content is None
+
         except Exception as e:
-            logging.error(f"Azure AI Error: {e}")
-            return None
+            logging.error(f"Azure OpenAI Error: {e}")
+            return f"Error communicating with AI service: {e}"
 
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            future = asyncio.ensure_future(call_azure_ai())
-            return asyncio.get_event_loop().run_until_complete(future)
-        else:
-            return loop.run_until_complete(call_azure_ai())
+        return asyncio.run(call_azure_openai())
     except Exception as e:
         logging.error(f"Error running AI summary: {e}")
         return f"Error running AI summary: {e}"
 
 @app.route('/api/run-pipeline', methods=['POST'])
 def api_run_pipeline():
-    return jsonify(run_pipeline_logic())
+    """
+    Starts the pipeline in a background thread and returns a job ID.
+    """
+    job_id = str(uuid.uuid4())
+    thread = threading.Thread(target=run_pipeline_logic, args=(job_id,))
+    thread.start()
+    return jsonify({"job_id": job_id})
+
+@app.route('/api/pipeline-status/<job_id>', methods=['GET'])
+def get_pipeline_status(job_id):
+    """
+    Returns the status of a background pipeline job.
+    """
+    job = pipeline_jobs.get(job_id)
+    if job is None:
+        return jsonify({"status": "not_found"}), 404
+    return jsonify(job)
 
 @app.route('/api/parse-org-chart', methods=['POST'])
 def api_parse_org_chart():
@@ -146,7 +205,9 @@ def api_get_pms():
 def api_get_projects():
     pm_name = request.args.get('pm')
     projects_df, error = load_project_data()
-    return jsonify(projects_df[projects_df['pm'] == pm_name].to_dict(orient='records')) if pm_name and not error else jsonify([])
+    if error:
+        return jsonify({"error": error}), 500
+    return jsonify(projects_df[projects_df['pm'] == pm_name].to_dict(orient='records')) if pm_name else jsonify([])
 
 @app.route('/api/get_update')
 def api_get_update():
@@ -157,7 +218,7 @@ def api_get_update():
     if not project_name or not month or not (year_str and year_str.isdigit()):
         return jsonify({})
 
-    year = int(year_str) if year_str else 0
+    year = int(year_str)
     connect_str = os.getenv('AZURE_STORAGE_CONNECTION_STRING')
     if not connect_str:
         logging.error("Azure Storage connection string missing.")
@@ -192,9 +253,10 @@ def api_update_project():
     if not all(field in data for field in required_fields):
         return jsonify({"success": False, "error": "Missing fields"}), 400
     try:
-        year = int(data['year']) if data.get('year') else 0
-    except ValueError:
+        year = int(data['year'])
+    except (ValueError, TypeError):
         return jsonify({"success": False, "error": "Invalid year"}), 400
+
     ai_summary = get_improved_ai_summary(data.get('description', ''), data['managerUpdate'])
     new_entry = pd.DataFrame([{
         'projectName': data['projectName'],
@@ -214,6 +276,9 @@ def api_update_project():
                 blob_client.download_blob().readinto(stream)
                 stream.seek(0)
                 updates_df = pd.read_csv(stream)
+            # Ensure 'year' column is of integer type for proper comparison
+            updates_df['year'] = pd.to_numeric(updates_df['year'], errors='coerce').fillna(0).astype(int)
+            # Remove existing entry for the same project-month-year
             updates_df = updates_df[~(
                 (updates_df['projectName'] == data['projectName']) &
                 (updates_df['month'] == data['month']) &

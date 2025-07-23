@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import docx
 import asyncio
 import re
+import inspect 
 
 from .dod_sbir_scraper import fetch_dod_sbir_sttr_topics
 from .nasa_sbir_module import fetch_nasa_sbir_opportunities
@@ -29,7 +30,7 @@ from .osti_foa_module import fetch_osti_foas
 from .arpae_scraper import fetch_arpae_opportunities
 from .iarpa_scraper import fetch_iarpa_opportunities
 from .sbir_pipeline_scraper import fetch_sbir_partnership_opportunities
-from .sam_gov_api_module import fetch_sam_gov_opportunities
+#from .sam_gov_api_module import fetch_sam_gov_opportunities
 
 from azure.ai.inference.aio import ChatCompletionsClient
 from azure.ai.inference.models import SystemMessage, UserMessage
@@ -92,10 +93,16 @@ def load_scraper_config():
 def run_scraper_task(scraper_config):
     name = scraper_config['name']
     try:
-        kwargs = {arg: HEADERS if val == "HEADERS" else val for arg, val in scraper_config.get('args', {}).items()}
+        target_func = scraper_config['function']
+        valid_params = inspect.signature(target_func).parameters
+        
+        raw_kwargs = {arg: HEADERS if val == "HEADERS" else val for arg, val in scraper_config.get('args', {}).items()}
         if name == "SBIR Partnerships":
-            kwargs['testing_mode'] = TESTING_MODE
-        data = scraper_config['function'](**kwargs)
+            raw_kwargs['testing_mode'] = TESTING_MODE
+        
+        filtered_kwargs = {key: val for key, val in raw_kwargs.items() if key in valid_params}
+        
+        data = target_func(**filtered_kwargs)
         for item in data:
             item[COL_SOURCE] = name
         return data, None
@@ -104,25 +111,37 @@ def run_scraper_task(scraper_config):
         return [], e
 
 async def call_azure_ai_async(system_prompt, user_prompt):
-    endpoint = os.getenv("AZURE_AI_ENDPOINT")
-    key = os.getenv("AZURE_AI_KEY")
+    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+    key = os.getenv("AZURE_OPENAI_KEY")
+    
     if not endpoint or not key:
-        logging.error("Missing Azure AI environment variables.")
+        logging.error("Missing Azure OpenAI environment variables.")
         return None
+        
     try:
-        client = ChatCompletionsClient(endpoint=endpoint, credential=AzureKeyCredential(key))
-        result = await client.complete(
-            deployment_name="gpt-4",
-            messages=[
-                SystemMessage(content=system_prompt),
-                UserMessage(content=user_prompt)
-            ],
-            max_tokens=1024,
-            temperature=0.2
+        from openai import AsyncAzureOpenAI
+
+        client = AsyncAzureOpenAI(
+            azure_endpoint=endpoint,
+            api_key=key,
+            api_version="2025-01-01-preview"  
         )
-        return result.choices[0].message.content.strip()
+
+        response = await client.chat.completions.create(
+            model="gpt-4",  
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+        )
+
+        if response.choices and response.choices[0].message and response.choices[0].message.content:
+             return response.choices[0].message.content.strip()
+             
+        return "" 
+
     except Exception as e:
-        logging.error(f"Azure AI failed: {e}", exc_info=True)
+        logging.error(f"Azure OpenAI call failed: {e}", exc_info=True)
         return None
 
 def analyze_opportunity_with_ai(opportunity, knowledge):
@@ -135,12 +154,7 @@ def analyze_opportunity_with_ai(opportunity, knowledge):
     OPPORTUNITY TEXT: --- {text} ---
     TASK: Analyze this opportunity for relevance to WBI. Reply ONLY with JSON having keys: "relevance_score", "justification", "related_experience", "funding_assessment", "suggested_internal_lead".
     """
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        response = loop.run_until_complete(call_azure_ai_async(system_prompt, user_prompt))
-    finally:
-        loop.close()
+    response = asyncio.run(call_azure_ai_async(system_prompt, user_prompt))
 
     if not response:
         return {"relevance_score": 0}
@@ -162,13 +176,8 @@ def find_partners_with_ai(opportunity, partners, knowledge):
     PARTNERS: --- {partners_text} ---
     TASK: Recommend up to 3 partners as JSON: {{ "suggested_partners": [{{"partner_company": "", "reasoning": ""}}] }}
     """
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        response = loop.run_until_complete(call_azure_ai_async(system_prompt, user_prompt))
-    finally:
-        loop.close()
-
+    response = asyncio.run(call_azure_ai_async(system_prompt, user_prompt))
+    
     if not response:
         return []
     try:
