@@ -10,16 +10,9 @@ from docx import Document
 
 from openai import AsyncAzureOpenAI
 
-# --- Load ENV ---
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass 
-
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
 AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY")
-AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT") 
+AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT")
 
 if not (AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_KEY and AZURE_OPENAI_DEPLOYMENT):
     raise EnvironmentError("Azure OpenAI ENV variables (ENDPOINT, KEY, DEPLOYMENT) are missing.")
@@ -40,7 +33,6 @@ def clean_ai_response(text):
         cleaned_text = re.sub(pattern, '', cleaned_text, flags=re.IGNORECASE | re.DOTALL)
     return cleaned_text.strip()
 
-# --- AI FUNCTION ---
 async def get_ai_research_summary(company_name):
     prompt = f"""
     Act as a senior venture capital analyst specializing in defense and aerospace. Research the US-based company '{company_name}'.
@@ -52,14 +44,12 @@ async def get_ai_research_summary(company_name):
     **Competitive Landscape:** 1-2 competitors and differentiation.
     **Sources:** Top 3-5 URLs.
     """
-
     try:
         client = AsyncAzureOpenAI(
             azure_endpoint=str(AZURE_OPENAI_ENDPOINT),
             api_key=str(AZURE_OPENAI_KEY),
             api_version="2024-02-01"
         )
-
         result = await client.chat.completions.create(
             model=str(AZURE_OPENAI_DEPLOYMENT),
             messages=[
@@ -69,13 +59,10 @@ async def get_ai_research_summary(company_name):
             temperature=0.4,
             max_tokens=2000
         )
-
         if result.choices and result.choices[0].message and result.choices[0].message.content:
             ai_response = result.choices[0].message.content
             return clean_ai_response(ai_response)
-        
         return "AI returned no content."
-
     except Exception as e:
         logging.error(f"Azure OpenAI API Error for {company_name}: {e}")
         return "AI summary failed due to API error."
@@ -83,7 +70,6 @@ async def get_ai_research_summary(company_name):
 def create_company_dossier(company_name, award_data, ai_summary):
     doc = Document()
     doc.add_heading(f'Dossier: {company_name}', level=1)
-
     doc.add_heading('SBIR Award Details', level=2)
     p = doc.add_paragraph()
     p.add_run('Award Title: ').bold = True
@@ -91,7 +77,6 @@ def create_company_dossier(company_name, award_data, ai_summary):
     p = doc.add_paragraph()
     p.add_run('Amount: ').bold = True
     p.add_run(f"${float(award_data.get('award_amount', 0)):,.2f}")
-
     p = doc.add_paragraph()
     p.add_run('Award Date: ').bold = True
     award_date = award_data.get('proposal_award_date', 'N/A')
@@ -99,11 +84,9 @@ def create_company_dossier(company_name, award_data, ai_summary):
         p.add_run(award_date.strftime('%Y-%m-%d'))
     else:
         p.add_run(str(award_date))
-
     p = doc.add_paragraph()
     p.add_run('Branch: ').bold = True
     p.add_run(str(award_data.get('branch', 'N/A')))
-
     doc.add_heading('AI-Generated Intelligence Summary', level=2)
     for line in ai_summary.split('\n'):
         line = line.strip()
@@ -114,7 +97,6 @@ def create_company_dossier(company_name, award_data, ai_summary):
             doc.add_paragraph(line.lstrip('* ').strip(), style='List Bullet')
         elif line:
             doc.add_paragraph(line)
-
     os.makedirs(OUTPUT_FOLDER, exist_ok=True)
     safe_filename = "".join(c for c in company_name if c.isalnum() or c == ' ').rstrip()
     filepath = os.path.join(OUTPUT_FOLDER, f"{safe_filename}.docx")
@@ -128,20 +110,25 @@ async def run_research_and_generate_dossiers(input_file):
     except FileNotFoundError:
         logging.error(f"File not found: {input_file}")
         return
-
     companies = df.drop_duplicates(subset='firm')
-    logging.info(f"Found {len(companies)} unique companies")
-
+    logging.info(f"Found {len(companies)} unique companies to process.")
     for _, row in companies.iterrows():
         company_name = row['firm']
+        safe_filename = "".join(c for c in company_name if c.isalnum() or c == ' ').rstrip()
+        filepath = os.path.join(OUTPUT_FOLDER, f"{safe_filename}.docx")
+        if os.path.exists(filepath):
+            logging.info(f"Skipping {company_name}: Dossier already exists.")
+            continue
         logging.info(f"Processing: {company_name}")
         summary = await get_ai_research_summary(company_name)
         create_company_dossier(company_name, row, summary)
-        await asyncio.sleep(2) 
+        await asyncio.sleep(2)
+
 async def run_phase_2():
     logging.info("--- Phase 2 Started ---")
     await run_research_and_generate_dossiers(INPUT_FILENAME)
     logging.info("--- Phase 2 Complete ---")
+# ---------------------------------
 
 if __name__ == "__main__":
     logging.basicConfig(

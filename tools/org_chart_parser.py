@@ -48,10 +48,10 @@ def parse_with_ai(text_chunk: str) -> pd.DataFrame:
 You are an expert data entry assistant. Parse the following text from an organizational chart and structure it into a clean JSON format.
 
 Rules:
-- The top-level object must have keys: "name", "leader", "title", "location".
-- It must have a "sub_units" key, containing a list of objects. Each sub-unit object should also have "name", "leader", "title", and "location" keys.
+- The top-level object must have a "name" key for the main organization.
+- It must have a "sub_units" key, containing a list of objects. Each sub-unit object must have a "name" key, and can optionally have "leader", "title", and "location" keys.
 - If information is missing, return an empty string for that key.
-- Provide ONLY the JSON object as your response.
+- Provide ONLY the JSON object as your response, starting with {{ and ending with }}.
 
 ---
 TEXT TO PARSE:
@@ -64,37 +64,47 @@ TEXT TO PARSE:
             print("[AI Error] No response received.")
             return pd.DataFrame()
 
+        print(f"[AI Debug] Raw response from AI: {ai_response_text}") 
+
         match = re.search(r'\{.*\}', ai_response_text, re.DOTALL)
         if not match:
             print("[AI Error] No valid JSON object found in response.")
             return pd.DataFrame()
 
-        data = json.loads(match.group(0))
+        json_string = match.group(0)
+        data = json.loads(json_string)
         
-        # --- FLATTENING LOGIC ---
         flat_data = []
-        main_unit = {
-            'Unit Name': data.get('name', ''),
+        
+        main_unit_name = data.get('name', 'Main Organization (Name not found)')
+        flat_data.append({
+            'Unit': main_unit_name,
             'Leader': data.get('leader', ''),
             'Title': data.get('title', ''),
             'Location': data.get('location', '')
-        }
-        flat_data.append(main_unit)
+        })
 
-        # Add the sub-units, indented
-        for subunit in data.get('sub_units', []):
-            sub_unit_data = {
-                'Unit Name': f"  ↳ {subunit.get('name', '')}",
-                'Leader': subunit.get('leader', ''),
-                'Title': subunit.get('title', ''),
-                'Location': subunit.get('location', '')
-            }
-            flat_data.append(sub_unit_data)
+        if 'sub_units' in data and isinstance(data['sub_units'], list):
+            for i, subunit in enumerate(data.get('sub_units', [])):
+                prefix = '  ↳ ' if i < len(data['sub_units']) else '  └ '
+                
+                flat_data.append({
+                    'Unit': f"{prefix}{subunit.get('name', 'Sub-unit (Name not found)')}",
+                    'Leader': subunit.get('leader', ''),
+                    'Title': subunit.get('title', ''),
+                    'Location': subunit.get('location', '')
+                })
         
-        return pd.DataFrame(flat_data)
+        final_df = pd.DataFrame(flat_data)
+        print(f"[AI Debug] Created DataFrame with {len(final_df)} rows.") 
+        return final_df
 
+    except json.JSONDecodeError as e:
+        print(f"[Parser Error] Failed to decode JSON: {e}")
+        print(f"[Parser Error] Malformed JSON string was: {json_string}")
+        return pd.DataFrame()
     except Exception as e:
-        print(f"[Parser Error] {e}")
+        print(f"[Parser Error] An unexpected error occurred: {e}")
         return pd.DataFrame()
 
 # === Excel Output ===
@@ -105,7 +115,6 @@ def save_and_format_excel(df: pd.DataFrame, output_directory: str, output_filena
     os.makedirs(output_directory, exist_ok=True)
     full_path = os.path.join(output_directory, output_filename)
     
-    # --- AUTO-FORMATTING LOGIC ---
     with pd.ExcelWriter(full_path, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='OrgChart')
         
