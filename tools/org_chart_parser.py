@@ -21,18 +21,21 @@ async def call_azure_ai(prompt_text: str) -> Optional[str]:
         client = AsyncAzureOpenAI(
             azure_endpoint=endpoint,
             api_key=key,
-            api_version="2025-01-01-preview" 
+            api_version="2025-01-01-preview",
+            timeout=60.0
         )
 
+        # --- THIS BLOCK IS NOW FIXED ---
         response = await client.chat.completions.create(
-            model="gpt-4",  
+            model="gpt-4",
             messages=[
                 {"role": "system", "content": "You are an expert data entry assistant for org charts."},
                 {"role": "user", "content": prompt_text}
             ],
-            max_tokens=2048,
-            temperature=0.2
+            max_tokens=4096,
+            temperature=0.1
         )
+        # ---------------------------------
         
         if response.choices and response.choices[0].message and response.choices[0].message.content:
             return response.choices[0].message.content.strip()
@@ -51,7 +54,7 @@ Rules:
 - The top-level object must have a "name" key for the main organization.
 - It must have a "sub_units" key, containing a list of objects. Each sub-unit object must have a "name" key, and can optionally have "leader", "title", and "location" keys.
 - If information is missing, return an empty string for that key.
-- Provide ONLY the JSON object as your response, starting with {{ and ending with }}.
+- Ensure your entire response is a single, complete, and valid JSON object. Provide ONLY the JSON object as your response, starting with {{ and ending with }}. Do not cut off the response early.
 
 ---
 TEXT TO PARSE:
@@ -64,7 +67,7 @@ TEXT TO PARSE:
             print("[AI Error] No response received.")
             return pd.DataFrame()
 
-        print(f"[AI Debug] Raw response from AI: {ai_response_text}") 
+        print(f"[AI Debug] Raw response from AI: {ai_response_text}")
 
         match = re.search(r'\{.*\}', ai_response_text, re.DOTALL)
         if not match:
@@ -96,7 +99,7 @@ TEXT TO PARSE:
                 })
         
         final_df = pd.DataFrame(flat_data)
-        print(f"[AI Debug] Created DataFrame with {len(final_df)} rows.") 
+        print(f"[AI Debug] Created DataFrame with {len(final_df)} rows.")
         return final_df
 
     except json.JSONDecodeError as e:
@@ -134,7 +137,7 @@ def save_and_format_excel(df: pd.DataFrame, output_directory: str, output_filena
 
     print(f"[Excel Output] Saved formatted file at {full_path}")
 
-# === PDF Processing  ===
+# === PDF Processing ===
 def process_uploaded_pdf(uploaded_file, output_directory: str) -> Optional[str]:
     try:
         if not hasattr(uploaded_file, 'filename') or not uploaded_file.filename:
@@ -143,7 +146,7 @@ def process_uploaded_pdf(uploaded_file, output_directory: str) -> Optional[str]:
             
         pdf_bytes = uploaded_file.read()
         with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
-            full_text = "".join(page.get_text() for page in doc) #type: ignore  
+            full_text = "".join(page.get_text() for page in doc) #type: ignore
             if not full_text.strip():
                 print("[PDF Processing] No text could be extracted from the PDF. It might be an image-only file.")
                 return None
