@@ -3,51 +3,47 @@ import pandas as pd
 import fitz  # PyMuPDF
 import json
 import re
-from dotenv import load_dotenv
-from azure.ai.inference.aio import ChatCompletionsClient
-from azure.ai.inference.models import SystemMessage, UserMessage
-from azure.core.credentials import AzureKeyCredential
 import asyncio
 from typing import Optional
 
-# === Load Environment Variables ===
-load_dotenv("samgovkey.env")
-
-AZURE_AI_ENDPOINT = os.getenv("AZURE_AI_ENDPOINT")
-AZURE_AI_KEY = os.getenv("AZURE_AI_KEY")
-AZURE_AI_MODEL_NAME = os.getenv("AZURE_AI_MODEL_NAME")
+from openai import AsyncAzureOpenAI
 
 # === Azure OpenAI Call ===
-async def call_azure_ai(prompt_text: str) -> str | None:
-    if not AZURE_AI_ENDPOINT or not AZURE_AI_KEY or not AZURE_AI_MODEL_NAME:
-        print("[Config Error] Azure AI credentials or model name not configured.")
+async def call_azure_ai(prompt_text: str) -> Optional[str]:
+    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+    key = os.getenv("AZURE_OPENAI_KEY")
+
+    if not endpoint or not key:
+        print("[Config Error] Azure OpenAI credentials not configured.")
         return None
 
     try:
-        client = ChatCompletionsClient(
-            endpoint=str(AZURE_AI_ENDPOINT),
-            credential=AzureKeyCredential(str(AZURE_AI_KEY))
+        client = AsyncAzureOpenAI(
+            azure_endpoint=endpoint,
+            api_key=key,
+            api_version="2025-01-01-preview" 
         )
-        response = await client.complete(
-            deployment_name=str(AZURE_AI_MODEL_NAME),
+
+        response = await client.chat.completions.create(
+            model="gpt-4",  
             messages=[
-                SystemMessage(content="You are an expert data entry assistant for org charts."),
-                UserMessage(content=prompt_text)
+                {"role": "system", "content": "You are an expert data entry assistant for org charts."},
+                {"role": "user", "content": prompt_text}
             ],
             max_tokens=2048,
             temperature=0.2
         )
-        return response.choices[0].message.content.strip()
+        
+        if response.choices and response.choices[0].message and response.choices[0].message.content:
+            return response.choices[0].message.content.strip()
+        return ""
+
     except Exception as e:
         print(f"[Azure AI Error] {e}")
         return None
 
 # === Org Chart Parsing Logic ===
 def parse_with_ai(text_chunk: str) -> pd.DataFrame:
-    if not AZURE_AI_ENDPOINT or not AZURE_AI_KEY or not AZURE_AI_MODEL_NAME:
-        print("[Config Error] Azure AI credentials or model name not configured.")
-        return pd.DataFrame()
-
     prompt = f"""
 You are an expert data entry assistant. Parse the following text from an organizational chart and structure it into a clean JSON format.
 
@@ -61,12 +57,8 @@ Rules:
 TEXT TO PARSE:
 {text_chunk}
 """
-
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        ai_response_text = loop.run_until_complete(call_azure_ai(prompt))
-        loop.close()
+        ai_response_text = asyncio.run(call_azure_ai(prompt))
 
         if not ai_response_text:
             print("[AI Error] No response received.")
@@ -78,7 +70,9 @@ TEXT TO PARSE:
             return pd.DataFrame()
 
         data = json.loads(match.group(0))
-        return pd.DataFrame([data])
+        if isinstance(data, dict):
+            data = [data]
+        return pd.DataFrame(data)
 
     except Exception as e:
         print(f"[Parser Error] {e}")
@@ -94,12 +88,19 @@ def save_and_format_excel(df: pd.DataFrame, output_directory: str, output_filena
     df.to_excel(full_path, index=False)
     print(f"[Excel Output] Saved file at {full_path}")
 
-# === PDF Processing ===
+# === PDF Processing  ===
 def process_uploaded_pdf(uploaded_file, output_directory: str) -> Optional[str]:
     try:
+        if not hasattr(uploaded_file, 'filename') or not uploaded_file.filename:
+            print("[File Error] Uploaded file has no filename.")
+            return None
+            
         pdf_bytes = uploaded_file.read()
         with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
-            full_text = "".join(page.get_text() for page in doc)  #type: ignore
+            full_text = "".join(page.get_text() for page in doc) #type: ignore  
+            if not full_text.strip():
+                print("[PDF Processing] No text could be extracted from the PDF. It might be an image-only file.")
+                return None
             
         ai_df = parse_with_ai(full_text)
         if ai_df.empty:

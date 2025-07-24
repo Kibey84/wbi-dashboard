@@ -29,43 +29,80 @@ function stopDots() {
     });
 
     // --- Tab 1: Opportunity Pipeline Logic ---
-    const runPipelineBtn = document.getElementById('runPipelineBtn');
-    if (runPipelineBtn) {
-        runPipelineBtn.addEventListener('click', async () => {
-            const progress = document.getElementById('pipelineProgress');
-            const log = document.getElementById('logContainer');
-            const oppsBtn = document.getElementById('downloadOppsBtn');
-            const matchBtn = document.getElementById('downloadMatchBtn');
-            progress.classList.remove('hidden');
-            log.innerHTML = '<div class="text-gray-400">🚀 Starting...</div>';
-            runPipelineBtn.disabled = true;
-            oppsBtn.disabled = true;
-            matchBtn.disabled = true;
-            try {
-                const response = await fetch('/api/run-pipeline', { method: 'POST' });
-                const result = await response.json();
-                log.innerHTML = '';
-                result.log.forEach(msg => {
+const runPipelineBtn = document.getElementById('runPipelineBtn');
+if (runPipelineBtn) {
+    const progressEl = document.getElementById('pipelineProgress');
+    const logContainerEl = document.getElementById('logContainer');
+    const oppsBtn = document.getElementById('downloadOppsBtn');
+    const matchBtn = document.getElementById('downloadMatchBtn');
+
+    async function checkPipelineStatus(jobId) {
+        try {
+            const response = await fetch(`/api/pipeline-status/${jobId}`);
+            if (!response.ok) {
+                logContainerEl.innerHTML += '<div class="text-red-500">Error: Could not get pipeline status.</div>';
+                return; // Stop polling
+            }
+            const data = await response.json();
+
+            if (data && data.log && Array.isArray(data.log)) {
+                logContainerEl.innerHTML = ''; // Clear previous logs
+                data.log.forEach(entry => {
                     const logEntry = document.createElement('div');
                     logEntry.className = 'log-entry text-gray-300';
-                    logEntry.innerHTML = msg.text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-                    log.appendChild(logEntry);
+                    logEntry.textContent = entry.text;
+                    logContainerEl.appendChild(logEntry);
                 });
-                if(result.opps_report_filename) {
-                    oppsBtn.onclick = () => window.location.href = `/download/${result.opps_report_filename}`;
+            }
+
+            if (data.status === 'completed' || data.status === 'failed') {
+                runPipelineBtn.disabled = false; // Re-enable the run button
+                
+                if (data.opps_report_filename) {
+                    oppsBtn.onclick = () => window.location.href = `/download/${data.opps_report_filename}`;
                     oppsBtn.disabled = false;
                 }
-                if(result.match_report_filename) {
-                    matchBtn.onclick = () => window.location.href = `/download/${result.match_report_filename}`;
+                if (data.match_report_filename) {
+                    matchBtn.onclick = () => window.location.href = `/download/${data.match_report_filename}`;
                     matchBtn.disabled = false;
                 }
-            } catch (error) {
-                log.innerHTML = `<div class="text-red-500">${error}</div>`;
-            } finally {
+                
+                if (data.status === 'failed') {
+                     logContainerEl.innerHTML += '<div class="text-red-500">Pipeline failed. Check server logs for details.</div>';
+                }
+
+            } else {
+                setTimeout(() => checkPipelineStatus(jobId), 3000);
+            }
+        } catch (error) {
+            logContainerEl.innerHTML += `<div class="text-red-500">Error: ${error}</div>`;
+            runPipelineBtn.disabled = false;
+        }
+    }
+
+    runPipelineBtn.addEventListener('click', async () => {
+        progressEl.classList.remove('hidden');
+        logContainerEl.innerHTML = '<div class="text-gray-400">🚀 Starting pipeline...</div>';
+        runPipelineBtn.disabled = true;
+        oppsBtn.disabled = true;
+        matchBtn.disabled = true;
+
+        try {
+            const response = await fetch('/api/run-pipeline', { method: 'POST' });
+            const result = await response.json();
+
+            if (result.job_id) {
+                checkPipelineStatus(result.job_id);
+            } else {
+                logContainerEl.innerHTML = '<div class="text-red-500">Error: Could not start pipeline job.</div>';
                 runPipelineBtn.disabled = false;
             }
-        });
-    }
+        } catch (error) {
+            logContainerEl.innerHTML = `<div class="text-red-500">${error}</div>`;
+            runPipelineBtn.disabled = false;
+        }
+    });
+}
 
     // --- Tab 2: Org Chart Parser Logic ---
     const fileUploadEl = document.getElementById('fileUpload');
