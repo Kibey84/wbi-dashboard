@@ -70,9 +70,28 @@ TEXT TO PARSE:
             return pd.DataFrame()
 
         data = json.loads(match.group(0))
-        if isinstance(data, dict):
-            data = [data]
-        return pd.DataFrame(data)
+        
+        # --- FLATTENING LOGIC ---
+        flat_data = []
+        main_unit = {
+            'Unit Name': data.get('name', ''),
+            'Leader': data.get('leader', ''),
+            'Title': data.get('title', ''),
+            'Location': data.get('location', '')
+        }
+        flat_data.append(main_unit)
+
+        # Add the sub-units, indented
+        for subunit in data.get('sub_units', []):
+            sub_unit_data = {
+                'Unit Name': f"  ↳ {subunit.get('name', '')}",
+                'Leader': subunit.get('leader', ''),
+                'Title': subunit.get('title', ''),
+                'Location': subunit.get('location', '')
+            }
+            flat_data.append(sub_unit_data)
+        
+        return pd.DataFrame(flat_data)
 
     except Exception as e:
         print(f"[Parser Error] {e}")
@@ -85,8 +104,26 @@ def save_and_format_excel(df: pd.DataFrame, output_directory: str, output_filena
         return
     os.makedirs(output_directory, exist_ok=True)
     full_path = os.path.join(output_directory, output_filename)
-    df.to_excel(full_path, index=False)
-    print(f"[Excel Output] Saved file at {full_path}")
+    
+    # --- AUTO-FORMATTING LOGIC ---
+    with pd.ExcelWriter(full_path, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='OrgChart')
+        
+        worksheet = writer.sheets['OrgChart']
+        
+        for column in worksheet.columns:
+            max_length = 0
+            column_letter = column[0].column_letter
+            for cell in column:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            adjusted_width = (max_length + 2)
+            worksheet.column_dimensions[column_letter].width = adjusted_width
+
+    print(f"[Excel Output] Saved formatted file at {full_path}")
 
 # === PDF Processing  ===
 def process_uploaded_pdf(uploaded_file, output_directory: str) -> Optional[str]:
