@@ -52,7 +52,74 @@
         </div>
         <div id="tab5" class="tab-content"><h2 class="text-2xl font-bold text-gray-800 mb-6">Monthly Project Status Reporting</h2><div class="bg-white p-4 rounded-lg shadow-sm mb-6 flex flex-wrap items-center gap-4"><div class="flex items-center gap-2"><label for="pmFilter" class="font-medium text-gray-700">Filter by PM:</label><select id="pmFilter" class="p-2 border border-gray-300 rounded-md"><option value="All">Select a Manager...</option></select></div><div class="flex items-center gap-2"><label for="statusFilter" class="font-medium text-gray-700">Filter by Status:</label><select id="statusFilter" class="p-2 border border-gray-300 rounded-md"><option value="All">All Projects</option><option value="Active">Active</option><option value="Completed">Completed</option><option value="Terminated">Terminated</option></select></div></div><div class="grid grid-cols-1 md:grid-cols-4 gap-6"><div class="md:col-span-1 bg-white p-4 rounded-lg shadow-sm"><h3 class="font-bold text-lg mb-2 border-b pb-2">Projects</h3><div id="project-list-menu" class="space-y-2 max-h-[600px] overflow-y-auto"><p class="text-gray-500 text-sm">Select a PM to see projects.</p></div></div><div id="project-detail-view" class="md:col-span-3"><div class="bg-white rounded-xl shadow-md p-6 border border-gray-200 text-center"><p class="text-gray-500">Please select a Project Manager to begin.</p></div></div></div></div>
         <div id="tab3" class="tab-content"><div class="bg-white rounded-xl shadow-md p-6 border"><p>This section is under construction.</p></div></div>
-        <div id="tab4" class="tab-content"><div class="bg-white rounded-xl shadow-md p-6 border"><p>This section is under construction.</p></div></div>
+        <div id="tab4" class="tab-content">
+    <div class="bg-white p-8 rounded-2xl shadow-xl">
+        <div class="mb-6 border-b border-gray-200">
+            <nav class="-mb-px flex space-x-6 overflow-x-auto" aria-label="Tabs">
+                <button class="boe-tab-btn active whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm" data-boetab="project-info">Project Info & AI</button>
+                <button class="boe-tab-btn whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm text-gray-500" data-boetab="labor">Labor</button>
+                <button class="boe-tab-btn whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm text-gray-500" data-boetab="materials">Materials & Tools</button>
+                <button class="boe-tab-btn whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm text-gray-500" data-boetab="travel">Travel</button>
+                <button class="boe-tab-btn whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm text-gray-500" data-boetab="subcontracts">Subcontracts</button>
+            </nav>
+        </div>
+
+        <div id="project-info" class="boe-tab-content active">
+            <h3 class="text-xl font-semibold mb-4 text-gray-800">1. Define Project Scope</h3>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                    <label for="projectTitle" class="block text-sm font-medium text-gray-700">Project Title</label>
+                    <input type="text" id="projectTitle" class="mt-1 w-full p-2 border border-gray-300 rounded-md">
+                </div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <label for="startDate" class="block text-sm font-medium text-gray-700">Projected Start Date</label>
+                        <input type="date" id="startDate" class="mt-1 w-full p-2 border border-gray-300 rounded-md">
+                    </div>
+                    <div>
+                        <label for="pop" class="block text-sm font-medium text-gray-700">Period of Performance (Months)</label>
+                        <input type="number" id="pop" class="mt-1 w-full p-2 border border-gray-300 rounded-md">
+                    </div>
+                </div>
+            </div>
+            <div class="mt-4">
+                <label for="scope" class="block text-sm font-medium text-gray-700">Scope of Work</label>
+                <div id="drop-zone" class="mt-1 flex justify-center px-6 pt-5 pb-6 border-2 border-gray-300 border-dashed rounded-md">
+                    <div class="space-y-1 text-center">
+                        <svg class="mx-auto h-12 w-12 text-gray-400" stroke="currentColor" fill="none" viewBox="0 0 48 48" aria-hidden="true"><path d="M28 8H12a4 4 0 00-4 4v20m32-12v8m0 0v8a4 4 0 01-4 4H12a4 4 0 01-4-4v-4m32-4l-3.172-3.172a4 4 0 00-5.656 0L28 28M8 32l9.172-9.172a4 4 0 015.656 0L28 28m0 0l4 4m4-24h8m-4-4v8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+                        <p class="pl-1">Drag & drop a scope file here, or paste text below.</p>
+                        <p id="drop-zone-text" class="text-xs text-gray-500">DOCX, PDF, XLSX, TXT supported</p>
+                    </div>
+                </div>
+                <textarea id="scope" rows="5" class="mt-2 w-full p-2 border border-gray-300 rounded-md"></textarea>
+            </div>
+            <div class="mt-6">
+                <h3 class="text-xl font-semibold mb-4 text-gray-800">2. Available Personnel</h3>
+                <div id="personnel-checkboxes" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                    <p class="col-span-full text-gray-500">Loading personnel from server...</p>
+                </div>
+            </div>
+            <div class="mt-6 text-center">
+                <button id="ai-estimate-btn" class="bg-yellow-500 text-black font-bold py-2 px-6 rounded-lg hover:bg-yellow-600 transition-colors flex items-center justify-center mx-auto">
+                    <svg id="ai-spinner" class="animate-spin -ml-1 mr-3 h-5 w-5 text-black hidden" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                    <span id="ai-btn-text">AI Estimate Full Project</span>
+                </button>
+            </div>
+        </div>
+
+        <div id="labor" class="boe-tab-content"><div class="flex justify-between items-center mb-4"><h3 class="text-xl font-semibold text-gray-800">Labor Hours by Task (Drag rows to reorder)</h3><div class="text-right"><span class="text-lg font-bold text-gray-800">Total Hours: </span><span id="total-labor-hours" class="text-lg font-bold text-gray-900">0</span></div></div><div class="overflow-x-auto"><table id="labor-table" class="min-w-full divide-y divide-gray-200"><thead class="bg-gray-50"></thead><tbody class="bg-white divide-y divide-gray-200"></tbody></table></div><button id="add-task-btn" class="mt-4 text-sm font-medium text-gray-700 hover:text-black">+ Add Task</button></div>
+        <div id="materials" class="boe-tab-content"><h3 class="text-xl font-semibold mb-4 text-gray-800">Materials & Tools</h3><table id="materials-table" class="min-w-full"><thead><tr class="text-left text-sm font-semibold text-gray-600"><th class="p-2">Part Number</th><th class="p-2 w-2/5">Description</th><th class="p-2">Vendor</th><th class="p-2">QTY</th><th class="p-2">Unit Cost</th><th class="p-2">Total</th><th></th></tr></thead><tbody></tbody></table><button id="add-material-btn" class="mt-4 text-sm font-medium text-gray-700 hover:text-black">+ Add Material</button></div>
+        <div id="travel" class="boe-tab-content"><h3 class="text-xl font-semibold mb-4 text-gray-800">Travel Costs</h3><table id="travel-table" class="min-w-full"><thead><tr class="text-left text-sm font-semibold text-gray-600"><th class="p-2 w-1/4">Purpose</th><th class="p-2"># Trips</th><th class="p-2"># Travelers</th><th class="p-2"># Days</th><th class="p-2">Airfare</th><th class="p-2">Lodging</th><th class="p-2">Per Diem</th><th class="p-2">Total</th><th></th></tr></thead><tbody></tbody></table><button id="add-travel-btn" class="mt-4 text-sm font-medium text-gray-700 hover:text-black">+ Add Trip</button></div>
+        <div id="subcontracts" class="boe-tab-content"><h3 class="text-xl font-semibold mb-4 text-gray-800">Subcontracts</h3><table id="subcontracts-table" class="min-w-full"><thead><tr class="text-left text-sm font-semibold text-gray-600"><th class="p-2 w-1/3">Subcontractor</th><th class="p-2 w-1/2">Description of Work</th><th class="p-2">Cost</th><th></th></tr></thead><tbody></tbody></table><button id="add-subcontract-btn" class="mt-4 text-sm font-medium text-gray-700 hover:text-black">+ Add Subcontractor</button></div>
+        
+        <div class="mt-8 border-t pt-8 text-center">
+            <button id="generate-btn" class="bg-gray-800 text-white font-bold py-3 px-8 rounded-lg hover:bg-gray-900 transition-colors">Generate Final BoE Documents</button>
+            <div id="output-section" class="hidden text-center mt-6">
+                 <div id="complete-state" class="hidden"><h3 class="text-2xl font-bold text-gray-800 mb-4">Downloads Ready</h3><div class="flex flex-col sm:flex-row justify-center items-center gap-4"><a id="download-excel" class="w-full sm:w-auto bg-green-600 text-white font-semibold py-2 px-5 rounded-lg hover:bg-green-700">Download Full BoE (.xlsx)</a><a id="download-pdf" class="w-full sm:w-auto bg-gray-700 text-white font-semibold py-2 px-5 rounded-lg hover:bg-gray-800">Download Customer PDF</a></div></div>
+            </div>
+        </div>
+    </div>
+</div>
     </main>
     <footer class="bg-black text-white py-8 mt-auto">
         <div class="max-w-7xl mx-auto px-4"><div class="border-t border-gray-700 pt-8"><div class="flex flex-col items-center"><img src="{{ url_for('static', filename='images/wbi-logo-crest.png') }}" alt="WBI Crest Logo" class="h-20 mb-6"><p class="text-gray-400 text-sm">&copy; 2025 WBI Business Development Center. All rights reserved.</p></div></div></div>

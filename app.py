@@ -115,6 +115,66 @@ def load_project_data():
     except Exception as e:
         return pd.DataFrame(), str(e)
 
+def get_ai_boe_estimate(scope, personnel):
+    """
+    Calls Azure OpenAI to get a structured BoE estimate from a project scope.
+    """
+    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+    key = os.getenv("AZURE_OPENAI_KEY")
+
+    if not endpoint or not key:
+        logging.error("Azure OpenAI environment variables for BoE are missing.")
+        return json.dumps({"error": "Azure AI service not configured."})
+
+    system_prompt = """
+You are an expert project estimator for a defense contractor named WBI. Your task is to take a scope of work and generate a detailed Basis of Estimate (BoE) in a structured JSON format.
+
+You must provide a JSON object with the following keys: "work_plan", "materials_and_tools", "travel", and "subcontracts".
+
+- "work_plan" must be a list of tasks. Each task object must have a "task" (string) and "hours" (object). The "hours" object must contain keys for each provided personnel role, with the estimated hours (integer) for that task.
+- "materials_and_tools" must be a list of items. Each item must have "part_number", "description", "vendor", "quantity", and "unit_cost".
+- "travel" must be a list of trips. Each trip must have "purpose", "trips", "travelers", "days", "airfare", "lodging", and "per_diem".
+- "subcontracts" must be a list of subcontractors. Each must have "subcontractor", "description", and "cost".
+
+If a category has no items, return an empty list for that key. Respond ONLY with the valid JSON object.
+"""
+    
+    user_prompt = f"""
+**Scope of Work:**
+{scope}
+
+**Available Personnel Roles:**
+{', '.join(personnel)}
+"""
+
+    async def call_azure_openai_for_boe():
+        try:
+            from openai import AsyncAzureOpenAI
+            client = AsyncAzureOpenAI(
+                azure_endpoint=str(endpoint),
+                api_key=str(key),
+                api_version="2025-01-01-preview",
+                timeout=120.0 
+            )
+            response = await client.chat.completions.create(
+                model="gpt-4",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.2,
+                max_tokens=4096,
+                response_format={"type": "json_object"} 
+            )
+            if response.choices and response.choices[0].message and response.choices[0].message.content:
+                return response.choices[0].message.content
+            return json.dumps({"error": "AI returned an empty response."})
+        except Exception as e:
+            logging.error(f"Azure OpenAI BoE Error: {e}")
+            return json.dumps({"error": f"An error occurred with the AI service: {e}"})
+
+    return asyncio.run(call_azure_openai_for_boe())
+
 @app.route("/status")
 def status():
     return "App is running"
@@ -276,9 +336,7 @@ def api_update_project():
                 blob_client.download_blob().readinto(stream)
                 stream.seek(0)
                 updates_df = pd.read_csv(stream)
-            # Ensure 'year' column is of integer type for proper comparison
             updates_df['year'] = pd.to_numeric(updates_df['year'], errors='coerce').fillna(0).astype(int)
-            # Remove existing entry for the same project-month-year
             updates_df = updates_df[~(
                 (updates_df['projectName'] == data['projectName']) &
                 (updates_df['month'] == data['month']) &
@@ -300,6 +358,38 @@ def download_file(filename):
 @app.route('/')
 def index():
     return render_template('index.html')
+
+@app.route('/api/rates', methods=['GET'])
+def get_rates():
+    try:
+        rates_path = os.path.join(basedir, 'tools', 'rates.json')
+        with open(rates_path, 'r') as f:
+            rates_data = json.load(f)
+        return jsonify(rates_data)
+    except Exception as e:
+        logging.error(f"Error loading rates.json: {e}")
+        return jsonify({"error": "Could not load labor rates."}), 500
+
+@app.route('/api/estimate', methods=['POST'])
+def api_estimate_boe():
+    data = request.json
+    
+    if not data:
+        return jsonify({"error": "Invalid request: No JSON body received."}), 400
+
+    scope = data.get('originalPrompt')
+    personnel = data.get('personnel')
+
+    if not scope or not personnel:
+        return jsonify({"error": "Missing scope or personnel data."}), 400
+    
+    ai_response_json = get_ai_boe_estimate(scope, personnel)
+    
+    try:
+        response_data = json.loads(ai_response_json)
+        return jsonify(response_data)
+    except json.JSONDecodeError:
+        return jsonify({"error": "Failed to decode AI response."}), 500
 
 if __name__ == '__main__':
     app.run(debug=True, port=5001, host='0.0.0.0')
