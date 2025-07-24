@@ -379,6 +379,7 @@ function formatCurrency(value) {
 }
 
 // Function to initialize all BoE-related event listeners
+
 function initializeBoeGenerator() {
     fetch('/static/images/wbi-logo-horz.png')
         .then(response => { if (!response.ok) throw new Error('Logo not found'); return response.blob(); })
@@ -394,29 +395,38 @@ function initializeBoeGenerator() {
             LABOR_RATES = data;
             populatePersonnelCheckboxes();
             populateLaborTable([]);
-            document.getElementById('ai-estimate-btn').disabled = false;
+            const estimateBtn = document.getElementById('ai-estimate-btn');
+            if(estimateBtn) estimateBtn.disabled = false;
         })
         .catch(error => {
             console.error('Error fetching labor rates:', error);
-            document.getElementById('personnel-checkboxes').innerHTML = `<p class="col-span-full text-red-500">Error: Could not load labor rates.</p>`;
+            const personnelCheckboxes = document.getElementById('personnel-checkboxes');
+            if(personnelCheckboxes) personnelCheckboxes.innerHTML = `<p class="col-span-full text-red-500">Error: Could not load labor rates.</p>`;
         });
 
     document.querySelectorAll('.boe-tab-btn').forEach(button => {
         button.addEventListener('click', (e) => {
             document.querySelectorAll('.boe-tab-btn, .boe-tab-content').forEach(el => el.classList.remove('active'));
-            e.target.classList.add('active');
-            const tabId = e.target.getAttribute('data-boetab');
-            document.getElementById(tabId).classList.add('active');
+            const tabButton = e.currentTarget; 
+            if (tabButton && tabButton instanceof HTMLElement) {
+                tabButton.classList.add('active');
+                const tabId = tabButton.dataset.boetab;
+                if(tabId) {
+                    const tabContent = document.getElementById(tabId);
+                    if (tabContent) tabContent.classList.add('active');
+                }
+            }
         });
     });
 
-    document.getElementById('ai-estimate-btn').disabled = true;
+    const estimateBtn = document.getElementById('ai-estimate-btn');
+    if(estimateBtn) estimateBtn.disabled = true;
     
     const laborTable = document.getElementById('labor-table');
     if (laborTable) {
         laborTable.addEventListener('input', calculateTotalLaborHours);
         const laborTableBody = laborTable.querySelector('tbody');
-        if (laborTableBody) {
+        if (laborTableBody && typeof Sortable !== 'undefined') {
              new Sortable(laborTableBody, { animation: 150, ghostClass: 'sortable-ghost' });
         }
     }
@@ -424,21 +434,87 @@ function initializeBoeGenerator() {
     setupDynamicTable('materials-table', 'add-material-btn', getMaterialRowHTML, calculateMaterials);
     setupDynamicTable('travel-table', 'add-travel-btn', getTravelRowHTML, calculateTravel);
     setupDynamicTable('subcontracts-table', 'add-subcontract-btn', getSubcontractRowHTML, ()=>{});
-    document.getElementById('add-task-btn').addEventListener('click', () => { addLaborRow(); calculateTotalLaborHours(); });
-    document.getElementById('generate-btn').addEventListener('click', handleGenerateBoe);
-    document.getElementById('ai-estimate-btn').addEventListener('click', handleAIEstimate);
     
+    const addTaskBtn = document.getElementById('add-task-btn');
+    if(addTaskBtn) addTaskBtn.addEventListener('click', () => { addLaborRow(); calculateTotalLaborHours(); });
+    
+    const generateBtn = document.getElementById('generate-btn');
+    if(generateBtn) generateBtn.addEventListener('click', handleGenerateBoe);
+    
+    if(estimateBtn) estimateBtn.addEventListener('click', handleAIEstimate);
+    
+    // --- THIS BLOCK IS NOW FIXED ---
     const dropZone = document.getElementById('drop-zone');
-    dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
-    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
-    dropZone.addEventListener('drop', (e) => {
-        e.preventDefault();
-        dropZone.classList.remove('dragover');
-        const file = e.dataTransfer.files[0];
-        if (file) {
-            handleScopeFile(file);
+    if (dropZone) {
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault(); 
+            dropZone.classList.add('dragover');
+        });
+        dropZone.addEventListener('dragleave', () => {
+            dropZone.classList.remove('dragover');
+        });
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault(); 
+            dropZone.classList.remove('dragover');
+            const file = e.dataTransfer.files[0];
+            if (file) {
+                handleScopeFile(file);
+            }
+        });
+    }
+}
+
+function handleScopeFile(file) {
+    const dropZoneText = document.getElementById('drop-zone-text');
+    const scopeTextArea = document.getElementById('scope');
+    if(!dropZoneText || !scopeTextArea) return;
+    
+    dropZoneText.textContent = `Processing: ${file.name}...`;
+
+    try {
+        const reader = new FileReader();
+        if (file.type === 'text/plain') {
+            reader.onload = (event) => { scopeTextArea.value = event.target.result; dropZoneText.textContent = `Loaded: ${file.name}`; };
+            reader.readAsText(file);
+        } else if (file.name.endsWith('.docx') && typeof mammoth !== 'undefined') {
+            reader.onload = (event) => {
+                mammoth.extractRawText({ arrayBuffer: event.target.result })
+                    .then(result => { scopeTextArea.value = result.value; dropZoneText.textContent = `Loaded: ${file.name}`; })
+                    .catch(err => { throw err; });
+            };
+            reader.readAsArrayBuffer(file);
+        } else if (file.type === 'application/pdf' && typeof pdfjsLib !== 'undefined') {
+            pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js`;
+            reader.onload = (event) => {
+                const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(event.target.result) });
+                loadingTask.promise.then(pdf => {
+                    const pagePromises = Array.from({ length: pdf.numPages }, (_, i) => pdf.getPage(i + 1).then(page => page.getTextContent()));
+                    Promise.all(pagePromises).then(textContents => {
+                        let fullText = textContents.map(tc => tc.items.map(item => item.str).join(' ')).join('\n');
+                        scopeTextArea.value = fullText;
+                        dropZoneText.textContent = `Loaded: ${file.name}`;
+                    }).catch(err => { throw err; });
+                }).catch(err => { throw err; });
+            };
+            reader.readAsArrayBuffer(file);
+        } else if (file.name.endsWith('.xlsx') && typeof XLSX !== 'undefined') {
+            reader.onload = (event) => {
+                const wb = XLSX.read(event.target.result, { type: 'binary' });
+                let txt = '';
+                wb.SheetNames.forEach(sheetName => { txt += XLSX.utils.sheet_to_csv(wb.Sheets[sheetName]) + '\n'; });
+                scopeTextArea.value = txt;
+                dropZoneText.textContent = `Loaded: ${file.name}`;
+            };
+            reader.readAsBinaryString(file);
+        } else {
+            throw new Error(`Unsupported file type: ${file.type || 'unknown'}.`);
         }
-    });
+        reader.onerror = () => { throw new Error("Error reading file buffer."); };
+    } catch (error) {
+        console.error("File Ingest Error:", error);
+        alert(`Failed to process file. Check console (F12) for details.`);
+        dropZoneText.textContent = "Drag & drop or paste scope";
+    }
 }
 
 function handleScopeFile(file) {
