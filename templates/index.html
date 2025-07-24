@@ -14,6 +14,39 @@
         @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
         .file-upload { border: 2px dashed #E5E7EB; transition: all 0.3s ease; }
         .file-upload:hover, .file-upload.dragover { border-color: #3B82F6; background-color: #F0F9FF; }
+        /* Add these to the <style> block in index.html */
+        .boe-tab-content .table-input {
+            width: 100%;
+            padding: 0.5rem;
+            border: 1px solid #d1d5db;
+            border-radius: 0.375rem;
+            box-sizing: border-box;
+        }
+        .boe-tab-content .table-input.text-left { text-align: left; }
+        .boe-tab-content table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .boe-tab-content th, .boe-tab-content td {
+            padding: 0.75rem;
+            text-align: left;
+            border-bottom: 1px solid #e5e7eb;
+        }
+        .boe-tab-content th {
+            font-weight: 600;
+            color: #374151;
+            background-color: #f9fafb;
+        }
+        .boe-tab-content td input[type="number"] {
+            text-align: right;
+        }
+        .boe-tab-content .delete-btn {
+            color: #ef4444;
+            font-weight: bold;
+            cursor: pointer;
+            background: none;
+            border: none;
+            padding: 0 0.5rem;}
     </style>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>

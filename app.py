@@ -117,7 +117,7 @@ def load_project_data():
 
 def get_ai_boe_estimate(scope, personnel):
     """
-    Calls Azure OpenAI to get a structured BoE estimate from a project scope.
+    Calls Azure OpenAI with improved prompting to get a structured BoE estimate.
     """
     endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
     key = os.getenv("AZURE_OPENAI_KEY")
@@ -126,12 +126,26 @@ def get_ai_boe_estimate(scope, personnel):
         logging.error("Azure OpenAI environment variables for BoE are missing.")
         return json.dumps({"error": "Azure AI service not configured."})
 
-    system_prompt = """
-You are an expert project estimator for a defense contractor named WBI. Your task is to take a scope of work and generate a detailed Basis of Estimate (BoE) in a structured JSON format.
+    examples = ""
+    try:
+        examples_path = os.path.join(basedir, 'tools', 'wbi_dataset_final.jsonl')
+        with open(examples_path, 'r') as f:
+            for i, line in enumerate(f):
+                if i >= 2: 
+                    break
+                data = json.loads(line)
+                user_text = data['contents'][0]['parts'][0]['text']
+                model_text = data['contents'][1]['parts'][0]['text']
+                examples += f"EXAMPLE INPUT:\n{user_text}\nEXAMPLE OUTPUT:\n{model_text}\n\n"
+    except Exception as e:
+        logging.error(f"Could not load few-shot examples: {e}")
+    
+    system_prompt = f"""
+You are an expert project estimator for a defense contractor named WBI. Your task is to take a scope of work and generate a detailed Basis of Estimate (BoE) in a structured JSON format. You will be given examples of previous estimates to learn from.
 
 You must provide a JSON object with the following keys: "work_plan", "materials_and_tools", "travel", and "subcontracts".
 
-- "work_plan" must be a list of tasks. Each task object must have a "task" (string) and "hours" (object). The "hours" object must contain keys for each provided personnel role, with the estimated hours (integer) for that task.
+- "work_plan" must be a list of tasks. Each task object must have a "task" (string) and "hours" (object). The "hours" object must contain keys for each provided personnel role, with the estimated hours (integer).
 - "materials_and_tools" must be a list of items. Each item must have "part_number", "description", "vendor", "quantity", and "unit_cost".
 - "travel" must be a list of trips. Each trip must have "purpose", "trips", "travelers", "days", "airfare", "lodging", and "per_diem".
 - "subcontracts" must be a list of subcontractors. Each must have "subcontractor", "description", and "cost".
@@ -140,6 +154,11 @@ If a category has no items, return an empty list for that key. Respond ONLY with
 """
     
     user_prompt = f"""
+Here are some examples of how to perform the estimate:
+{examples}
+---
+Now, perform the estimation for the following new request:
+
 **Scope of Work:**
 {scope}
 
@@ -153,8 +172,8 @@ If a category has no items, return an empty list for that key. Respond ONLY with
             client = AsyncAzureOpenAI(
                 azure_endpoint=str(endpoint),
                 api_key=str(key),
-                api_version="2025-01-01-preview",
-                timeout=120.0 
+                api_version="2024-02-01",
+                timeout=120.0
             )
             response = await client.chat.completions.create(
                 model="gpt-4",
@@ -164,7 +183,7 @@ If a category has no items, return an empty list for that key. Respond ONLY with
                 ],
                 temperature=0.2,
                 max_tokens=4096,
-                response_format={"type": "json_object"} 
+                response_format={"type": "json_object"}
             )
             if response.choices and response.choices[0].message and response.choices[0].message.content:
                 return response.choices[0].message.content
@@ -214,7 +233,7 @@ def get_improved_ai_summary(description, update):
             if message_content:
                 return message_content.strip()
             
-            return "" # Return an empty string if content is None
+            return ""
 
         except Exception as e:
             logging.error(f"Azure OpenAI Error: {e}")
