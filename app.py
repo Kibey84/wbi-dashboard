@@ -8,6 +8,7 @@ import asyncio
 import logging
 import threading
 import uuid
+import re
 
 from tools import org_chart_parser
 from tools import wbiops
@@ -17,8 +18,6 @@ from azure.ai.inference.aio import ChatCompletionsClient
 from azure.ai.inference.models import SystemMessage, UserMessage
 from azure.core.credentials import AzureKeyCredential
 
-# Ensure environment variables for Azure services are set in your deployment configuration.
-# e.g., AZURE_STORAGE_CONNECTION_STRING, AZURE_AI_ENDPOINT, AZURE_AI_KEY
 print("Flask App Loaded. ENV:", os.environ.get("AZURE_STORAGE_CONNECTION_STRING"))
 
 basedir = os.path.abspath(os.path.dirname(__file__))
@@ -36,7 +35,6 @@ UPDATES_FILE = 'updates.csv'
 if not logging.getLogger().hasHandlers():
     logging.basicConfig(level=logging.INFO)
 
-# A dictionary to store the status of background pipeline jobs
 pipeline_jobs = {}
 
 def run_pipeline_logic(job_id):
@@ -44,7 +42,6 @@ def run_pipeline_logic(job_id):
     This function runs the WBI pipeline in a background thread.
     It updates the global `pipeline_jobs` dictionary with its status.
     """
-    # Initialize job status
     pipeline_jobs[job_id] = {
         "status": "running",
         "log": [{"text": "✅ Pipeline Started"}],
@@ -54,7 +51,6 @@ def run_pipeline_logic(job_id):
     log = pipeline_jobs[job_id]["log"]
 
     try:
-        # Pass the log list to the pipeline function to append real-time updates
         result = wbiops.run_wbi_pipeline(log)
         opps_df, matchmaking_df = result if result else (pd.DataFrame(), pd.DataFrame())
 
@@ -115,125 +111,123 @@ def load_project_data():
     except Exception as e:
         return pd.DataFrame(), str(e)
 
-def get_ai_boe_estimate(scope, personnel):
+def get_ai_boe_estimate(scope, personnel, case_history):
     """
-    Calls Azure OpenAI with improved prompting to get a structured BoE estimate.
+    Calls the deployed DeepSeek model with a specialized prompt and case history.
     """
-    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-    key = os.getenv("AZURE_OPENAI_KEY")
+    endpoint = os.getenv("DEEPSEEK_AZURE_ENDPOINT")
+    api_key = os.getenv("DEEPSEEK_AZURE_KEY")
+    model_name = "WBI-Dash-DeepSeek" 
 
-    if not endpoint or not key:
-        logging.error("Azure OpenAI environment variables for BoE are missing.")
-        return json.dumps({"error": "Azure AI service not configured."})
+    if not endpoint or not api_key:
+        logging.error("DEEPSEEK_AZURE_ENDPOINT or DEEPSEEK_AZURE_KEY environment variables are missing.")
+        return json.dumps({"error": "AI service not configured."})
 
-    examples = ""
-    try:
-        examples_path = os.path.join(basedir, 'tools', 'wbi_dataset_final.jsonl')
-        with open(examples_path, 'r') as f:
-            for i, line in enumerate(f):
-                if i >= 2: 
-                    break
-                data = json.loads(line)
-                user_text = data['contents'][0]['parts'][0]['text']
-                model_text = data['contents'][1]['parts'][0]['text']
-                examples += f"EXAMPLE INPUT:\n{user_text}\nEXAMPLE OUTPUT:\n{model_text}\n\n"
-    except Exception as e:
-        logging.error(f"Could not load few-shot examples: {e}")
-    
     system_prompt = f"""
-You are an expert project estimator for a defense contractor named WBI. Your task is to take a scope of work and generate a detailed Basis of Estimate (BoE) in a structured JSON format. You will be given examples of previous estimates to learn from.
-
-You must provide a JSON object with the following keys: "work_plan", "materials_and_tools", "travel", and "subcontracts".
-
-- "work_plan" must be a list of tasks. Each task object must have a "task" (string) and "hours" (object). The "hours" object must contain keys for each provided personnel role, with the estimated hours (integer).
-- "materials_and_tools" must be a list of items. Each item must have "part_number", "description", "vendor", "quantity", and "unit_cost".
-- "travel" must be a list of trips. Each trip must have "purpose", "trips", "travelers", "days", "airfare", "lodging", and "per_diem".
-- "subcontracts" must be a list of subcontractors. Each must have "subcontractor", "description", and "cost".
-
-If a category has no items, return an empty list for that key. Respond ONLY with the valid JSON object.
+You are a specialist in finance and Basis of Estimate (BOE) development for government proposals, specifically for the Department of the Air Force. Your role is to create accurate, auditable, and competitive cost proposals. When responding, you must heavily rely on the provided Case History to inform your cost estimates, labor category mapping, and rationale. If the case history is empty, state that you need data to provide an accurate estimate. Always break down your reasoning. The current date is {datetime.now().strftime('%A, %B %d, %Y')}.
 """
     
     user_prompt = f"""
-Here are some examples of how to perform the estimate:
-{examples}
+**Case History:**
+{case_history if case_history else 'No case history provided.'}
 ---
-Now, perform the estimation for the following new request:
+**New Request:**
 
 **Scope of Work:**
 {scope}
 
 **Available Personnel Roles:**
 {', '.join(personnel)}
+---
+**Your Task:**
+Generate the complete JSON Basis of Estimate based on the new request, using the case history as your primary guide for estimating hours and costs. The JSON object must have keys: "work_plan", "materials_and_tools", "travel", and "subcontracts". Provide ONLY the JSON object as your response.
 """
 
-    async def call_azure_openai_for_boe():
-        try:
-            from openai import AsyncAzureOpenAI
-            client = AsyncAzureOpenAI(
-                azure_endpoint=str(endpoint),
-                api_key=str(key),
-                api_version="2024-02-01",
-                timeout=120.0
-            )
-            response = await client.chat.completions.create(
-                model="gpt-4",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.2,
-                max_tokens=4096,
-                response_format={"type": "json_object"}
-            )
-            if response.choices and response.choices[0].message and response.choices[0].message.content:
-                return response.choices[0].message.content
-            return json.dumps({"error": "AI returned an empty response."})
-        except Exception as e:
-            logging.error(f"Azure OpenAI BoE Error: {e}")
-            return json.dumps({"error": f"An error occurred with the AI service: {e}"})
+    try:
+        from azure.ai.inference import ChatCompletionsClient
+        from azure.ai.inference.models import SystemMessage, UserMessage
+        from azure.core.credentials import AzureKeyCredential
 
-    return asyncio.run(call_azure_openai_for_boe())
+        client = ChatCompletionsClient(
+            endpoint=str(endpoint),
+            credential=AzureKeyCredential(str(api_key)),
+            api_version="2024-05-01-preview"
+        )
+        
+        response = client.complete(
+            model=model_name,
+            messages=[
+                SystemMessage(content=system_prompt),
+                UserMessage(content=user_prompt)
+            ],
+            temperature=0.1,
+            max_tokens=4096
+        )
+        
+        if response.choices and response.choices[0].message and response.choices[0].message.content:
+            raw_content = response.choices[0].message.content
+            match = re.search(r'\{.*\}', raw_content, re.DOTALL)
+            if match:
+                return match.group(0)
+            else:
+                logging.error(f"DeepSeek BoE Error: No valid JSON found in response: {raw_content}")
+                return json.dumps({"error": "AI returned a non-JSON response."})
+
+        return json.dumps({"error": "AI returned an empty response."})
+    except Exception as e:
+        logging.error(f"DeepSeek BoE Error: {e}", exc_info=True)
+        return json.dumps({"error": f"An error occurred with the AI service: {e}"})
 
 @app.route("/status")
 def status():
     return "App is running"
 
 def get_improved_ai_summary(description, update):
-    
-    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT") 
-    key = os.getenv("AZURE_OPENAI_KEY")           
+    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+    key = os.getenv("AZURE_OPENAI_KEY")
 
     if not endpoint or not key or not update:
         logging.error("Azure OpenAI endpoint/key missing or no update provided.")
         return "Azure OpenAI not configured or no update provided."
 
-    system_prompt = "You are an expert Project Manager at WBI. Summarize the following project update."
-    user_prompt = f"**Project Description:**\n{description}\n\n**Monthly Update:**\n{update}"
+    system_prompt = """
+You are an expert Project Manager at WBI writing an executive summary for a monthly status report. Your task is to take a project description (for context) and a brief update and rewrite it into a professional, concise, and impactful summary.
+
+Crucially, you must explicitly highlight WBI's contributions and role in the progress described. Frame the update from the perspective of what WBI has accomplished or is currently doing.
+"""
+    
+    user_prompt = f"""
+**Project Description (for context):**
+{description}
+
+**Brief Monthly Update to Improve:**
+{update}
+
+**Rewritten Update (Highlighting WBI's Contributions):**
+"""
 
     async def call_azure_openai():
         try:
-            
             from openai import AsyncAzureOpenAI
 
             client = AsyncAzureOpenAI(
-                azure_endpoint=endpoint,
-                api_key=key,
-                api_version="2025-01-01-preview"  
+                azure_endpoint=str(endpoint),
+                api_key=str(key),
+                api_version="2024-02-01"
             )
 
             response = await client.chat.completions.create(
-                model="gpt-4",  
+                model="gpt-4",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ]
             )
             
-            message_content = response.choices[0].message.content
-            if message_content:
-                return message_content.strip()
+            if response.choices and response.choices[0].message and response.choices[0].message.content:
+                return response.choices[0].message.content.strip()
             
-            return ""
+            return "AI returned no content."
 
         except Exception as e:
             logging.error(f"Azure OpenAI Error: {e}")
@@ -392,7 +386,6 @@ def get_rates():
 @app.route('/api/estimate', methods=['POST'])
 def api_estimate_boe():
     data = request.json
-    
     if not data:
         return jsonify({"error": "Invalid request: No JSON body received."}), 400
 
@@ -402,13 +395,26 @@ def api_estimate_boe():
     if not scope or not personnel:
         return jsonify({"error": "Missing scope or personnel data."}), 400
     
-    ai_response_json = get_ai_boe_estimate(scope, personnel)
+    case_history = ""
+    try:
+        history_path = os.path.join(basedir, 'tools', 'wbi_dataset_final.jsonl')
+        with open(history_path, 'r') as f:
+            for i, line in enumerate(f):
+                if i >= 3:
+                    break
+                entry = json.loads(line)
+                case_history += entry['contents'][0]['parts'][0]['text'] + "\n"
+                case_history += "RESULT:\n" + entry['contents'][1]['parts'][0]['text'] + "\n---\n"
+    except Exception as e:
+        logging.warning(f"Could not load case history: {e}")
+    
+    ai_response_json = get_ai_boe_estimate(scope, personnel, case_history)
     
     try:
         response_data = json.loads(ai_response_json)
         return jsonify(response_data)
     except json.JSONDecodeError:
-        return jsonify({"error": "Failed to decode AI response."}), 500
+        return jsonify({"error": "Failed to decode AI response.", "raw_response": ai_response_json}), 500
 
 if __name__ == '__main__':
     app.run(debug=True, port=5001, host='0.0.0.0')
