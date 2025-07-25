@@ -113,6 +113,8 @@ def load_project_data():
     except Exception as e:
         return pd.DataFrame(), str(e)
 
+# In app.py
+
 def get_ai_boe_estimate(scope, personnel, case_history):
     """
     Calls the deployed DeepSeek model with a specialized prompt and case history.
@@ -122,11 +124,14 @@ def get_ai_boe_estimate(scope, personnel, case_history):
     model_name = "WBI-Dash-DeepSeek" 
 
     if not endpoint or not api_key:
-        logging.error("DEEPSEEK_AZURE_ENDPOINT or DEEPSEEK_AZURE_KEY environment variables are missing.")
-        return json.dumps({"error": "AI service not configured."})
+        logging.error("DEEPSEEK environment variables are missing.")
+        return {"error": "AI service not configured."}
 
+    # --- THIS IS THE CORRECTED PROMPT ---
     system_prompt = f"""
 You are a specialist in finance and Basis of Estimate (BOE) development for government proposals, specifically for the Department of the Air Force. Your role is to create accurate, auditable, and competitive cost proposals. When responding, you must heavily rely on the provided Case History to inform your cost estimates, labor category mapping, and rationale. If the case history is empty, state that you need data to provide an accurate estimate. Always break down your reasoning. The current date is {datetime.now().strftime('%A, %B %d, %Y')}.
+
+IMPORTANT: Your entire response must be ONLY the valid JSON object requested. Do not include any explanatory text, reasoning, or markdown formatting before or after the JSON.
 """
     
     user_prompt = f"""
@@ -142,7 +147,7 @@ You are a specialist in finance and Basis of Estimate (BOE) development for gove
 {', '.join(personnel)}
 ---
 **Your Task:**
-Generate the complete JSON Basis of Estimate based on the new request, using the case history as your primary guide for estimating hours and costs. The JSON object must have keys: "work_plan", "materials_and_tools", "travel", and "subcontracts". Provide ONLY the JSON object as your response.
+Generate the complete JSON Basis of Estimate based on the new request, using the case history as your primary guide for estimating hours and costs. The JSON object must have keys: "work_plan", "materials_and_tools", "travel", and "subcontracts".
 """
 
     try:
@@ -170,15 +175,15 @@ Generate the complete JSON Basis of Estimate based on the new request, using the
             raw_content = response.choices[0].message.content
             match = re.search(r'\{.*\}', raw_content, re.DOTALL)
             if match:
-                return match.group(0)
+                return json.loads(match.group(0))
             else:
                 logging.error(f"DeepSeek BoE Error: No valid JSON found in response: {raw_content}")
-                return json.dumps({"error": "AI returned a non-JSON response."})
+                return {"error": "AI returned a non-JSON response."}
 
-        return json.dumps({"error": "AI returned an empty response."})
+        return {"error": "AI returned an empty response."}
     except Exception as e:
         logging.error(f"DeepSeek BoE Error: {e}", exc_info=True)
-        return json.dumps({"error": f"An error occurred with the AI service: {e}"})
+        return {"error": f"An error occurred with the AI service: {e}"}
 
 @app.route("/status")
 def status():
@@ -389,34 +394,35 @@ def get_rates():
 def api_estimate_boe():
     data = request.json
     if not data:
-        return jsonify({"error": "Invalid request: No JSON body received."}), 400
-
+        return jsonify({"error": "Invalid request"}), 400
+    
     scope = data.get('originalPrompt')
     personnel = data.get('personnel')
-
     if not scope or not personnel:
-        return jsonify({"error": "Missing scope or personnel data."}), 400
-    
+        return jsonify({"error": "Missing scope or personnel"}), 400
+        
     case_history = ""
     try:
         history_path = os.path.join(basedir, 'tools', 'wbi_dataset_final.jsonl')
         with open(history_path, 'r') as f:
-            for i, line in enumerate(f):
-                if i >= 3:
-                    break
-                entry = json.loads(line)
+            first_line = f.readline()
+            if first_line:
+                entry = json.loads(first_line)
                 case_history += entry['contents'][0]['parts'][0]['text'] + "\n"
                 case_history += "RESULT:\n" + entry['contents'][1]['parts'][0]['text'] + "\n---\n"
     except Exception as e:
         logging.warning(f"Could not load case history: {e}")
     
-    ai_response_json = get_ai_boe_estimate(scope, personnel, case_history)
+    # --- THIS BLOCK IS NOW FIXED ---
+    # This function now returns a Python dictionary directly.
+    response_data = get_ai_boe_estimate(scope, personnel, case_history)
     
-    try:
-        response_data = json.loads(ai_response_json)
-        return jsonify(response_data)
-    except json.JSONDecodeError:
-        return jsonify({"error": "Failed to decode AI response.", "raw_response": ai_response_json}), 500
+    # We no longer need to parse it, so we can check for an error and return it.
+    if "error" in response_data:
+        logging.error(f"AI estimation failed with error: {response_data['error']}")
+        return jsonify(response_data), 500
+        
+    return jsonify(response_data)
 
 @app.route('/api/generate-boe-excel', methods=['POST'])
 def generate_boe_excel():
