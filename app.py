@@ -451,7 +451,7 @@ def create_formatted_boe_excel(project_data, totals):
     Creates a multi-sheet, formatted BoE Excel file in memory.
     """
     output_stream = io.BytesIO()
-    with pd.ExcelWriter(output_stream, engine='xlsxwriter') as writer:
+    with pd.ExcelWriter(output_stream, engine='xlsxwriter', engine_kwargs={"options": {}}) as writer:
         workbook = cast(Workbook, writer.book)
         
         # --- Define Formats ---
