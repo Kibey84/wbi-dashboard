@@ -789,18 +789,57 @@ async function handleAIEstimate() {
 }
 
 async function handleGenerateBoe() {
-    const btn = document.getElementById('generate-btn'), out = document.getElementById('output-section'), comp = document.getElementById('complete-state');
-    btn.disabled = true; out.classList.remove('hidden'); comp.classList.add('hidden');
-    
+    const btn = document.getElementById('generate-btn');
+    const out = document.getElementById('output-section');
+    const comp = document.getElementById('complete-state');
+    const downloadExcelLink = document.getElementById('download-excel');
+    const downloadPdfLink = document.getElementById('download-pdf');
+
+    if (!btn || !out || !comp || !downloadExcelLink || !downloadPdfLink) {
+        console.error("A required BoE element is missing from the page.");
+        return;
+    }
+
+    btn.disabled = true;
+    out.classList.remove('hidden');
+    comp.classList.add('hidden');
+
     try {
         const projectData = getCurrentProjectData();
         const totals = calculateAllTotals(projectData);
-        generatePdfFile(projectData.project_title, totals);
-        generateExcelFile(projectData, totals);
+
+        const excelResponse = await fetch('/api/generate-boe-excel', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ projectData, totals })
+        });
+
+        if (!excelResponse.ok) {
+            throw new Error('Failed to generate the Excel file on the server.');
+        }
+        const excelBlob = await excelResponse.blob();
+        downloadExcelLink.href = URL.createObjectURL(excelBlob);
+        downloadExcelLink.download = `BoE_${projectData.project_title.replace(/\s+/g, '_')}_Full.xlsx`;
+
+        const pdfResponse = await fetch('/api/generate-boe-pdf', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ projectData, totals })
+        });
+        
+        if (!pdfResponse.ok) {
+            throw new Error('Failed to generate the PDF file on the server.');
+        }
+        const pdfBlob = await pdfResponse.blob();
+        downloadPdfLink.href = URL.createObjectURL(pdfBlob);
+        downloadPdfLink.download = `BoE_${projectData.project_title.replace(/\s+/g, '_')}_Customer.pdf`;
+
         comp.classList.remove('hidden');
+
     } catch (error) {
         console.error("BoE Generation Error:", error);
-        alert(`An error occurred: ${error.message}`);
+        alert(`An error occurred while generating documents: ${error.message}`);
+        out.classList.add('hidden');
     } finally {
         btn.disabled = false;
     }

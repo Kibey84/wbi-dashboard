@@ -1,7 +1,7 @@
 import os
 import pandas as pd
 from datetime import datetime
-from flask import Flask, render_template, jsonify, request, send_from_directory
+from flask import Flask, render_template, jsonify, request, send_from_directory, send_file
 import io
 import json
 import asyncio
@@ -9,6 +9,8 @@ import logging
 import threading
 import uuid
 import re
+from xlsxwriter.workbook import Workbook  
+from typing import cast
 
 from tools import org_chart_parser
 from tools import wbiops
@@ -415,6 +417,92 @@ def api_estimate_boe():
         return jsonify(response_data)
     except json.JSONDecodeError:
         return jsonify({"error": "Failed to decode AI response.", "raw_response": ai_response_json}), 500
+
+@app.route('/api/generate-boe-excel', methods=['POST'])
+def generate_boe_excel():
+    data = request.json
+    if not data:
+        return jsonify({"error": "Invalid request: No JSON body received."}), 400
+
+    project_data = data.get('projectData')
+    totals = data.get('totals')
+
+    if not project_data or not totals:
+        return jsonify({"error": "Missing project data or totals."}), 400
+
+    try:
+        excel_stream = create_formatted_boe_excel(project_data, totals)
+        
+        project_title = project_data.get('project_title', 'BoE_Report').replace(' ', '_')
+        filename = f"BoE_{project_title}_Full.xlsx"
+
+        return send_file(
+            excel_stream,
+            as_attachment=True,
+            download_name=filename,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+    except Exception as e:
+        logging.error(f"Failed to generate BoE Excel file: {e}", exc_info=True)
+        return jsonify({"error": "Failed to generate Excel file."}), 500
+
+def create_formatted_boe_excel(project_data, totals):
+    """
+    Creates a multi-sheet, formatted BoE Excel file in memory.
+    """
+    output_stream = io.BytesIO()
+    with pd.ExcelWriter(output_stream, engine='xlsxwriter') as writer:
+        workbook = cast(Workbook, writer.book)
+        
+        # --- Define Formats ---
+        title_format = workbook.add_format({'bold': True, 'font_size': 14, 'align': 'left'})
+        currency_format = workbook.add_format({'num_format': '$#,##0.00'})
+        total_currency_format = workbook.add_format({'num_format': '$#,##0.00', 'bold': True, 'top': 1, 'bottom': 1})
+        
+        # --- Cost Summary Sheet ---
+        summary_df = pd.DataFrame([
+            {"Cost Element": "Direct Labor", "Amount": totals['laborCost']},
+            {"Cost Element": "Materials & Tools", "Amount": totals['materialsCost']},
+            {"Cost Element": "Travel", "Amount": totals['travelCost']},
+            {"Cost Element": "Subcontracts", "Amount": totals['subcontractCost']},
+            {"Cost Element": "Total Direct Costs", "Amount": totals['totalDirectCosts']},
+            {"Cost Element": "Overhead", "Amount": totals['overheadAmount']},
+            {"Cost Element": "Subtotal", "Amount": totals['subtotal']},
+            {"Cost Element": "G&A", "Amount": totals['gnaAmount']},
+            {"Cost Element": "Total Cost", "Amount": totals['totalCost']},
+            {"Cost Element": "Fee", "Amount": totals['feeAmount']},
+            {"Cost Element": "Total Proposed Price", "Amount": totals['totalPrice']},
+        ])
+        summary_df.to_excel(writer, sheet_name='Cost Summary', index=False, startrow=3)
+        summary_ws = writer.sheets['Cost Summary']
+        summary_ws.write('A1', f"BoE Summary: {project_data.get('project_title', 'N/A')}", title_format)
+        summary_ws.set_column('A:A', 30, None)
+        summary_ws.set_column('B:B', 20, currency_format)
+        summary_ws.write('B9', totals['totalDirectCosts'], total_currency_format)
+        summary_ws.write('B13', totals['totalPrice'], total_currency_format)
+
+        # --- Labor Detail Sheet ---
+        if project_data.get('work_plan'):
+            labor_data = []
+            for task in project_data['work_plan']:
+                row = {'WBS Element': task['task']}
+                row.update(task['hours'])
+                labor_data.append(row)
+            labor_df = pd.DataFrame(labor_data)
+            labor_df.to_excel(writer, sheet_name='Labor Detail', index=False)
+            labor_ws = writer.sheets['Labor Detail']
+            labor_ws.set_column('A:A', 40, None)
+
+        # --- Other Detail Sheets ---
+        if project_data.get('materials_and_tools'):
+            pd.DataFrame(project_data['materials_and_tools']).to_excel(writer, sheet_name='Materials & Tools', index=False)
+        if project_data.get('travel'):
+            pd.DataFrame(project_data['travel']).to_excel(writer, sheet_name='Travel', index=False)
+        if project_data.get('subcontracts'):
+            pd.DataFrame(project_data['subcontracts']).to_excel(writer, sheet_name='Subcontracts', index=False)
+            
+    output_stream.seek(0)
+    return output_stream
 
 if __name__ == '__main__':
     app.run(debug=True, port=5001, host='0.0.0.0')
