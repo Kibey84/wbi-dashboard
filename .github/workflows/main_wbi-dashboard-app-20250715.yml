@@ -1,7 +1,3 @@
-# Docs for the Azure Web Apps Deploy action: https://github.com/Azure/webapps-deploy
-# More GitHub Actions for Azure: https://github.com/Azure/actions
-# More info on Python, GitHub Actions, and Azure App Service: https://aka.ms/python-webapps-actions
-
 name: Build and deploy Python app to Azure Web App - wbi-dashboard-app-20250715
 
 on:
@@ -13,8 +9,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read 
 
     steps:
       - uses: actions/checkout@v4
@@ -23,49 +17,31 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
-      - name: Create and start virtual environment
-        run: python -m venv venv
       
-      - name: Install dependencies
-        run: python -m pip install --no-cache-dir -r requirements.txt
-        
-      - name: List files before zipping
-        run: ls -la
-
       - name: Zip artifact for deployment
-        run: zip -r release.zip . -x "venv/*" ".git/*" "**/__pycache__/*"
+        run: zip -r release.zip . -x ".git/*" "**/__pycache__/*" "venv/*"
 
-
-      - name: Zip artifact for deployment
-        run: zip -r release.zip . -x "venv/*" ".git/*"
-
-      - name: Upload artifact for deployment jobs
+      - name: Upload artifact for deployment job
         uses: actions/upload-artifact@v4
         with:
           name: python-app
-          path: |
-            release.zip
-            !venv/
+          path: release.zip
 
   deploy:
     runs-on: ubuntu-latest
     needs: build
+    environment:
+      name: 'Production'
+      url: ${{ steps.deploy-to-webapp.outputs.webapp-url }}
+    
     permissions:
-      id-token: write 
-      contents: read
+      id-token: write
 
     steps:
       - name: Download artifact from build job
         uses: actions/download-artifact@v4
         with:
           name: python-app
-
-      - name: Unzip artifact for deployment
-        run: unzip release.zip
-
-      - name: List files after unzip
-        run: ls -la
 
       - name: Login to Azure
         uses: azure/login@v2
@@ -75,9 +51,9 @@ jobs:
           subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_54A8BC931E19445C9B84C859530DCA09 }}
 
       - name: 'Deploy to Azure Web App'
-        uses: azure/webapps-deploy@v3
         id: deploy-to-webapp
+        uses: azure/webapps-deploy@v3
         with:
           app-name: 'wbi-dashboard-app-20250715'
           slot-name: 'Production'
-          
+          package: release.zip
