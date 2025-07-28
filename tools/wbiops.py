@@ -12,25 +12,25 @@ import asyncio
 import re
 import inspect 
 
-from .dod_sbir_scraper import fetch_dod_sbir_sttr_topics
-from .nasa_sbir_module import fetch_nasa_sbir_opportunities
-from .darpa_module import fetch_darpa_opportunities
-from .arpah_module import fetch_arpah_opportunities
-from .eureka_module import fetch_eureka_opportunities
-from .nsin_module import fetch_nsin_opportunities
-from .nih_sbir_module import fetch_nih_sbir_opportunities
-from .nstxl_module import fetch_nstxl_opportunities
-from .mtec_module import fetch_mtec_opportunities
-from .afwerx_module import fetch_afwerx_opportunities
-from .diu_scraper import fetch_diu_opportunities
-from .socom_baa_module import fetch_socom_opportunities
-from .arl_opportunities_module import fetch_arl_opportunities
-from .nasc_solutions_module import fetch_nasc_opportunities
-from .osti_foa_module import fetch_osti_foas
-from .arpae_scraper import fetch_arpae_opportunities
-from .iarpa_scraper import fetch_iarpa_opportunities
-from .sbir_pipeline_scraper import fetch_sbir_partnership_opportunities
-#from .sam_gov_api_module import fetch_sam_gov_opportunities
+#from .dod_sbir_scraper import fetch_dod_sbir_sttr_topics
+#from .nasa_sbir_module import fetch_nasa_sbir_opportunities
+#from .darpa_module import fetch_darpa_opportunities
+#from .arpah_module import fetch_arpah_opportunities
+#from .eureka_module import fetch_eureka_opportunities
+#from .nsin_module import fetch_nsin_opportunities
+#from .nih_sbir_module import fetch_nih_sbir_opportunities
+#from .nstxl_module import fetch_nstxl_opportunities
+#from .mtec_module import fetch_mtec_opportunities
+#from .afwerx_module import fetch_afwerx_opportunities
+#from .diu_scraper import fetch_diu_opportunities
+#from .socom_baa_module import fetch_socom_opportunities
+#from .arl_opportunities_module import fetch_arl_opportunities
+#from .nasc_solutions_module import fetch_nasc_opportunities
+#from .osti_foa_module import fetch_osti_foas
+#from .arpae_scraper import fetch_arpae_opportunities
+#from .iarpa_scraper import fetch_iarpa_opportunities
+#from .sbir_pipeline_scraper import fetch_sbir_partnership_opportunities
+from .sam_gov_api_module import fetch_sam_gov_opportunities
 
 from azure.ai.inference.aio import ChatCompletionsClient
 from azure.ai.inference.models import SystemMessage, UserMessage

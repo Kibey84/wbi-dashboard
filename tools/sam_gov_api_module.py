@@ -3,8 +3,8 @@ import requests
 import logging
 from datetime import datetime, timedelta
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, RetryError
-import json
 import os
+import json
 
 # --- Logger Setup ---
 module_logger = logging.getLogger(__name__)
@@ -36,21 +36,24 @@ def _make_sam_api_request_with_retries(url, params, headers, logger_instance):
         raise
 
 # --- Main Fetch Function ---
-def fetch_sam_gov_opportunities(api_key: str) -> list:
+def fetch_sam_gov_opportunities() -> list:
     module_logger.info("🔍 Scraping SAM.gov via API (with pagination)...")
+
+    # Pull key from Azure env
+    api_key = os.getenv("SAM_GOV_API_KEY")
     if not api_key or api_key.strip() == "":
-        module_logger.warning("SAM.gov API key not provided. Skipping API scrape.")
+        module_logger.error("❌ SAM.gov API key not set in environment. Skipping SAM.gov scrape.")
         return []
 
     api_url = "https://api.sam.gov/prod/opportunities/v1/search"
-    
+
     API_LIMIT_PER_PAGE = 100
     MAX_TOTAL_RECORDS_TO_FETCH = 500
-    DELAY_BETWEEN_PAGES_SECONDS = 5
+    DELAY_BETWEEN_PAGES_SECONDS = 3
     DAYS_TO_LOOK_BACK = 14
 
     all_api_results = []
-    posted_from_date = (datetime.now() - timedelta(days=DAYS_TO_LOOK_BACK)).strftime("%Y-%m-%d")
+    posted_from_date = (datetime.utcnow() - timedelta(days=DAYS_TO_LOOK_BACK)).strftime("%Y-%m-%d")
 
     params = {
         "api_key": api_key,
@@ -59,6 +62,11 @@ def fetch_sam_gov_opportunities(api_key: str) -> list:
         "limit": API_LIMIT_PER_PAGE,
         "postedFrom": posted_from_date,
         "offset": 0
+    }
+
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "WBI-Dashboard/1.0 (+https://wbi-dashboard-app)"
     }
 
     module_logger.info(f"Applying date filter: fetching opportunities posted from {posted_from_date}")
@@ -75,7 +83,8 @@ def fetch_sam_gov_opportunities(api_key: str) -> list:
         module_logger.info(f"Querying SAM.gov API. Limit: {API_LIMIT_PER_PAGE}, Offset: {current_offset}")
 
         try:
-            data = _make_sam_api_request_with_retries(api_url, params, {}, module_logger)
+            data = _make_sam_api_request_with_retries(api_url, params, headers, module_logger)
+
             notices = data.get("opportunitiesData", [])
             total_records_for_query = data.get("totalRecords", 0)
 
@@ -90,17 +99,26 @@ def fetch_sam_gov_opportunities(api_key: str) -> list:
                 description = str(notice.get("description") or "").strip()
                 link = notice.get("uiLink")
 
+                # Fallback link if uiLink missing
                 if not link and notice.get("solicitationNumber"):
                     link = f"https://sam.gov/opp/{notice.get('solicitationNumber')}/view"
+
+                close_date = notice.get("responseDeadLine")
+                if close_date:
+                    try:
+                        close_date = datetime.strptime(close_date, "%Y-%m-%dT%H:%M:%S.%f%z").strftime("%Y-%m-%d")
+                    except Exception:
+                        close_date = str(close_date)  # fallback as string
 
                 all_api_results.append({
                     "Source": "SAM.gov API",
                     "Title": title,
-                    "Description": description[:2000],
-                    "URL": link,
-                    "ScrapedDate": datetime.now().isoformat(),
-                    "Close Date": notice.get("responseDeadLine")
+                    "Description": description[:2000],  # prevent bloat
+                    "URL": link or "N/A",
+                    "ScrapedDate": datetime.utcnow().isoformat(),
+                    "Close Date": close_date or "N/A"
                 })
+
                 records_fetched_this_session += 1
                 if records_fetched_this_session >= MAX_TOTAL_RECORDS_TO_FETCH:
                     break
@@ -121,25 +139,10 @@ def fetch_sam_gov_opportunities(api_key: str) -> list:
             module_logger.error(f"❌ SAM.gov API scraping failed: {e_sam}", exc_info=True)
             break
 
-    module_logger.info(f"Finished. Scraped {len(all_api_results)} total opportunities to be analyzed.")
+    module_logger.info(f"✅ Finished. Scraped {len(all_api_results)} total opportunities.")
     return all_api_results
 
-# --- Standalone Test ---
+# --- Optional Debug Entry Point ---
 if __name__ == '__main__':
-    from dotenv import load_dotenv
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(funcName)s - %(message)s')
-
-    load_dotenv("samgovkey.env")
-    test_api_key = os.environ.get("SAM_GOV_API_KEY")
-
-    if not test_api_key or test_api_key.strip() == "":
-        module_logger.error("API key is missing or empty in samgovkey.env. Cannot run standalone test.")
-        exit(1)
-
-    opportunities = fetch_sam_gov_opportunities(api_key=test_api_key)
-
-    if opportunities:
-        print(f"\n--- Found {len(opportunities)} SAM.gov Opportunities ---")
-        print(json.dumps(opportunities, indent=2))
-    else:
-        print("No SAM.gov opportunities found.")
+    results = fetch_sam_gov_opportunities()
+    print(json.dumps(results, indent=2))
