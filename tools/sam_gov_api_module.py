@@ -56,7 +56,6 @@ def fetch_sam_gov_opportunities() -> list:
     posted_from_date = (datetime.utcnow() - timedelta(days=DAYS_TO_LOOK_BACK)).strftime("%Y-%m-%d")
 
     params = {
-        "api_key": api_key,
         "noticeType": "Combined Synopsis/Solicitation,Solicitation,Presolicitation,Special Notice",
         "sort": "-modifiedDate",
         "limit": API_LIMIT_PER_PAGE,
@@ -66,7 +65,8 @@ def fetch_sam_gov_opportunities() -> list:
 
     headers = {
         "Accept": "application/json",
-        "User-Agent": "WBI-Dashboard/1.0 (+https://wbi-dashboard-app)"
+        "User-Agent": "WBI-Dashboard/1.0 (+https://wbi-dashboard-app)",
+        "X-API-KEY": api_key
     }
 
     module_logger.info(f"Applying date filter: fetching opportunities posted from {posted_from_date}")
