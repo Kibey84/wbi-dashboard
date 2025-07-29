@@ -213,6 +213,12 @@ def analyze_opportunity_with_ai(opportunity, knowledge):
 
 # ------------------ MAIN PIPELINE ------------------
 def run_wbi_pipeline(log):
+   
+    if not all([AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_KEY, AZURE_OPENAI_DEPLOYMENT]):
+        log.append({"text": "❌ ERROR: Azure AI environment variables are not set. Halting pipeline."})
+        logging.error("Azure AI environment variables are not set.")
+        return pd.DataFrame(), pd.DataFrame() # Return empty dataframes
+
     start = time.time()
     log.append({"text": "🚀 Starting Pipeline..."})
     if TESTING_MODE:
