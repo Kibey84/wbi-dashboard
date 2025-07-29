@@ -23,13 +23,14 @@ if not module_logger.handlers:
     retry=retry_if_exception_type(requests.exceptions.RequestException)
 )
 def _make_sam_api_request_with_retries(url, params, headers, logger_instance):
-    """Makes an API request to SAM.gov with exponential backoff."""
+    """Makes an API request to SAM.gov v2 with exponential backoff."""
     try:
-        response = requests.get(url, params=params, headers=headers, timeout=45)
+        response = requests.get(url, params=params, headers=headers, timeout=60)
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
         logger_instance.error(f"RequestException during SAM.gov API call to {url}: {e}")
+        logger_instance.error(f"Response content: {getattr(e.response, 'text', 'No response text')}")
         raise
     except ValueError as e_json:
         logger_instance.error(f"JSONDecodeError: Failed to parse JSON response from {url}: {e_json}")
@@ -37,7 +38,7 @@ def _make_sam_api_request_with_retries(url, params, headers, logger_instance):
 
 # --- Main Fetch Function ---
 def fetch_sam_gov_opportunities() -> list:
-    module_logger.info("🔍 Scraping SAM.gov via API (with pagination)...")
+    module_logger.info("🔍 Scraping SAM.gov v2 via API (with pagination)...")
 
     # Pull key from Azure env
     api_key = os.getenv("SAM_GOV_API_KEY")
@@ -45,31 +46,33 @@ def fetch_sam_gov_opportunities() -> list:
         module_logger.error("❌ SAM.gov API key not set in environment. Skipping SAM.gov scrape.")
         return []
 
-    api_url = "https://api.sam.gov/prod/opportunities/v1/search"
+    api_url = "https://api.sam.gov/opportunities/v2/search"
 
-    API_LIMIT_PER_PAGE = 100
+    API_LIMIT_PER_PAGE = 1000   
     MAX_TOTAL_RECORDS_TO_FETCH = 500
-    DELAY_BETWEEN_PAGES_SECONDS = 3
+    DELAY_BETWEEN_PAGES_SECONDS = 2
     DAYS_TO_LOOK_BACK = 14
 
     all_api_results = []
-    posted_from_date = (datetime.utcnow() - timedelta(days=DAYS_TO_LOOK_BACK)).strftime("%Y-%m-%d")
+    posted_from_date = (datetime.utcnow() - timedelta(days=DAYS_TO_LOOK_BACK)).strftime("%m/%d/%Y")
+    posted_to_date = datetime.utcnow().strftime("%m/%d/%Y")
 
     params = {
-        "noticeType": "Combined Synopsis/Solicitation,Solicitation,Presolicitation,Special Notice",
+        "api_key": api_key,
+        "noticeType": "o,k,p,s,r",  
         "sort": "-modifiedDate",
         "limit": API_LIMIT_PER_PAGE,
         "postedFrom": posted_from_date,
+        "postedTo": posted_to_date,
         "offset": 0
     }
 
     headers = {
         "Accept": "application/json",
-        "User-Agent": "WBI-Dashboard/1.0 (+https://wbi-dashboard-app)",
-        "X-API-KEY": api_key
+        "User-Agent": "WBI-Dashboard/1.0 (+https://wbi-dashboard-app)"
     }
 
-    module_logger.info(f"Applying date filter: fetching opportunities posted from {posted_from_date}")
+    module_logger.info(f"Applying date filter: {posted_from_date} to {posted_to_date}")
 
     current_offset = 0
     records_fetched_this_session = 0
@@ -85,38 +88,41 @@ def fetch_sam_gov_opportunities() -> list:
         try:
             data = _make_sam_api_request_with_retries(api_url, params, headers, module_logger)
 
-            notices = data.get("opportunitiesData", [])
+            notices = data.get("opportunitiesData") or data.get("opportunities") or []
             total_records_for_query = data.get("totalRecords", 0)
 
             if not notices:
-                module_logger.info(f"No more notices found at offset {current_offset}. Total for query was {total_records_for_query}.")
+                module_logger.info(f"No more notices at offset {current_offset}. Total available: {total_records_for_query}.")
                 break
 
-            module_logger.info(f"Retrieved {len(notices)} notices. Total available for query: {total_records_for_query}.")
+            module_logger.info(f"Retrieved {len(notices)} notices. Total available: {total_records_for_query}.")
 
             for notice in notices:
                 title = str(notice.get("title") or "Title Not Available").strip()
                 description = str(notice.get("description") or "").strip()
-                link = notice.get("uiLink")
+                link = notice.get("uiLink") or "N/A"
 
-                # Fallback link if uiLink missing
-                if not link and notice.get("solicitationNumber"):
+                if link == "N/A" and notice.get("solicitationNumber"):
                     link = f"https://sam.gov/opp/{notice.get('solicitationNumber')}/view"
 
                 close_date = notice.get("responseDeadLine")
                 if close_date:
                     try:
-                        close_date = datetime.strptime(close_date, "%Y-%m-%dT%H:%M:%S.%f%z").strftime("%Y-%m-%d")
+                        close_date = datetime.strptime(close_date, "%Y-%m-%d").strftime("%Y-%m-%d")
                     except Exception:
-                        close_date = str(close_date)  # fallback as string
+                        close_date = str(close_date) 
 
                 all_api_results.append({
-                    "Source": "SAM.gov API",
+                    "Source": "SAM.gov API v2",
                     "Title": title,
-                    "Description": description[:2000],  # prevent bloat
-                    "URL": link or "N/A",
+                    "Description": description[:2000],
+                    "URL": link,
                     "ScrapedDate": datetime.utcnow().isoformat(),
-                    "Close Date": close_date or "N/A"
+                    "Close Date": close_date or "N/A",
+                    "SetAside": notice.get("setAside") or "N/A",
+                    "NAICS": notice.get("naicsCode") or "N/A",
+                    "Classification": notice.get("classificationCode") or "N/A",
+                    "POC": notice.get("pointOfContact") or []
                 })
 
                 records_fetched_this_session += 1
@@ -128,7 +134,7 @@ def fetch_sam_gov_opportunities() -> list:
                 module_logger.info("Fetched all available records for the current query criteria.")
                 break
 
-            module_logger.info(f"Waiting {DELAY_BETWEEN_PAGES_SECONDS} seconds before fetching next page...")
+            module_logger.info(f"Waiting {DELAY_BETWEEN_PAGES_SECONDS} seconds before next page...")
             time.sleep(DELAY_BETWEEN_PAGES_SECONDS)
 
         except RetryError as e_retry:
