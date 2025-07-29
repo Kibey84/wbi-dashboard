@@ -12,31 +12,31 @@ import asyncio
 import re
 import inspect
 
-# --- Azure AI Inference Imports (unchanged) ---
+# --- Azure AI Inference Imports ---
 from azure.ai.inference.aio import ChatCompletionsClient
 from azure.ai.inference.models import SystemMessage, UserMessage
 from azure.core.credentials import AzureKeyCredential
 
-# --- All Module Imports (unchanged) ---
-from .dod_sbir_scraper import fetch_dod_sbir_sttr_topics
-from .nasa_sbir_module import fetch_nasa_sbir_opportunities
-from .darpa_module import fetch_darpa_opportunities
-from .arpah_module import fetch_arpah_opportunities
-from .eureka_module import fetch_eureka_opportunities
-from .nsin_module import fetch_nsin_opportunities
-from .nih_sbir_module import fetch_nih_sbir_opportunities
-from .nstxl_module import fetch_nstxl_opportunities
-from .mtec_module import fetch_mtec_opportunities
-from .afwerx_module import fetch_afwerx_opportunities
-from .diu_scraper import fetch_diu_opportunities
-from .socom_baa_module import fetch_socom_opportunities
-from .arl_opportunities_module import fetch_arl_opportunities
-from .nasc_solutions_module import fetch_nasc_opportunities
-from .osti_foa_module import fetch_osti_foas
-from .arpae_scraper import fetch_arpae_opportunities
-from .iarpa_scraper import fetch_iarpa_opportunities
-from .sbir_pipeline_scraper import fetch_sbir_partnership_opportunities
-from .sam_gov_api_module import fetch_sam_gov_opportunities  # patched to v2
+# --- All Module Imports ---
+#from .dod_sbir_scraper import fetch_dod_sbir_sttr_topics
+#from .nasa_sbir_module import fetch_nasa_sbir_opportunities
+#from .darpa_module import fetch_darpa_opportunities
+#from .arpah_module import fetch_arpah_opportunities
+#from .eureka_module import fetch_eureka_opportunities
+#from .nsin_module import fetch_nsin_opportunities
+#from .nih_sbir_module import fetch_nih_sbir_opportunities
+#from .nstxl_module import fetch_nstxl_opportunities
+#from .mtec_module import fetch_mtec_opportunities
+#from .afwerx_module import fetch_afwerx_opportunities
+#from .diu_scraper import fetch_diu_opportunities
+#from .socom_baa_module import fetch_socom_opportunities
+#from .arl_opportunities_module import fetch_arl_opportunities
+#from .nasc_solutions_module import fetch_nasc_opportunities
+#from .osti_foa_module import fetch_osti_foas
+#from .arpae_scraper import fetch_arpae_opportunities
+#from .iarpa_scraper import fetch_iarpa_opportunities
+#from .sbir_pipeline_scraper import fetch_sbir_partnership_opportunities
+from .sam_gov_api_module import fetch_sam_gov_opportunities  
 
 TESTING_MODE = False
 
@@ -50,6 +50,11 @@ COL_URL = 'URL'
 COL_IS_NEW = 'Is_New'
 COL_RELEVANCE = 'AI Relevance Score'
 COL_SOURCE = 'Source'
+
+# Load environment variables
+AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
+AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY")
+AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT")
 
 if not logging.getLogger().handlers:
     logging.basicConfig(level=logging.INFO,
@@ -117,35 +122,47 @@ def run_scraper_task(scraper_config):
         return [], e
 
 # ------------------ AI CALL ------------------
-async def call_azure_ai_async(system_prompt, user_prompt):
-    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-    key = os.getenv("AZURE_OPENAI_KEY")
-
-    if not endpoint or not key:
+async def _chat_with_azure_openai_async(text: str):
+    if not AZURE_OPENAI_ENDPOINT or not AZURE_OPENAI_KEY or not AZURE_OPENAI_DEPLOYMENT:
         logging.error("Missing Azure OpenAI environment variables.")
         return None
 
     try:
+        credential = AzureKeyCredential(AZURE_OPENAI_KEY)
         client = ChatCompletionsClient(
-            endpoint=endpoint,
-            credential=AzureKeyCredential(key)
+            endpoint=AZURE_OPENAI_ENDPOINT,
+            credential=credential
         )
 
-        response = await client.complete(
+        completion = await client.complete(
+            model=AZURE_OPENAI_DEPLOYMENT,
             messages=[
-                SystemMessage(content=system_prompt),
-                UserMessage(content=user_prompt)
+                SystemMessage(content="You are a helpful assistant."),
+                UserMessage(content=text)
             ],
-            model="gpt-4"
+            temperature=0.7,
+            max_tokens=500,
         )
 
-        if response.choices and response.choices[0].message:
-            return response.choices[0].message.content.strip()
+        if completion.choices and completion.choices[0].message:
+            return completion.choices[0].message.content.strip()
+
         return ""
 
     except Exception as e:
         logging.error(f"Azure OpenAI call failed: {e}", exc_info=True)
         return None
+
+
+def chat_with_azure_openai(text: str):
+    """Wrapper to safely call async Azure function from sync code."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(_chat_with_azure_openai_async(text))
+    else:
+        return loop.run_until_complete(_chat_with_azure_openai_async(text))
+
 
 # ------------------ AI ANALYSIS ------------------
 def analyze_opportunity_with_ai(opportunity, knowledge):
@@ -160,7 +177,6 @@ def analyze_opportunity_with_ai(opportunity, knowledge):
     if not text.strip():
         return {"relevance_score": 0}
 
-    system_prompt = "You are a business analyst for WBI specializing in U.S. defense and federal contracting opportunities."
     user_prompt = f"""
     WBI CAPABILITIES: --- {knowledge} ---
 
@@ -176,7 +192,11 @@ def analyze_opportunity_with_ai(opportunity, knowledge):
     "suggested_internal_lead".
     """
 
-    response = asyncio.run(call_azure_ai_async(system_prompt, user_prompt))
+    try:
+        response = chat_with_azure_openai(user_prompt)
+    except Exception as e:
+        logging.error(f"AI call failed: {e}", exc_info=True)
+        return {"relevance_score": 0}
 
     if not response:
         return {"relevance_score": 0}
@@ -187,7 +207,9 @@ def analyze_opportunity_with_ai(opportunity, knowledge):
             return json.loads(match.group(0))
     except json.JSONDecodeError:
         logging.error(f"Invalid JSON in AI response: {response}")
+
     return {"relevance_score": 0}
+
 
 # ------------------ MAIN PIPELINE ------------------
 def run_wbi_pipeline(log):
@@ -222,9 +244,9 @@ def run_wbi_pipeline(log):
             except Exception as e:
                 failed.append(name)
 
-    # --- New SAM.gov v2 Scraper ---
+    # --- SAM.gov v2 Scraper ---
     try:
-        sam_opps = fetch_sam_gov_opportunities()  # already patched to v2
+        sam_opps = fetch_sam_gov_opportunities()
         all_opps.extend(sam_opps)
         logging.info(f"SAM.gov returned {len(sam_opps)} opportunities.")
     except Exception as e:

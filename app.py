@@ -41,11 +41,11 @@ pipeline_jobs = {}
 
 def run_pipeline_logic(job_id):
     """
-    This function runs the WBI pipeline in a background thread.
-    It updates the global `pipeline_jobs` dictionary with its status.
+    Runs the WBI pipeline in a background thread and updates the global status with phases.
     """
     pipeline_jobs[job_id] = {
         "status": "running",
+        "phase": "initializing",
         "log": [{"text": "✅ Pipeline Started"}],
         "opps_report_filename": None,
         "match_report_filename": None
@@ -53,9 +53,10 @@ def run_pipeline_logic(job_id):
     log = pipeline_jobs[job_id]["log"]
 
     try:
-        result = wbiops.run_wbi_pipeline(log)
-        opps_df, matchmaking_df = result if result else (pd.DataFrame(), pd.DataFrame())
+        pipeline_jobs[job_id]["phase"] = "scraping opportunities"
+        opps_df, matchmaking_df = wbiops.run_wbi_pipeline(log)
 
+        pipeline_jobs[job_id]["phase"] = "generating reports"
         if not opps_df.empty:
             opps_filename = f"Opportunity_Report_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.xlsx"
             opps_df.to_excel(os.path.join(REPORTS_DIR, opps_filename), index=False)
@@ -68,14 +69,15 @@ def run_pipeline_logic(job_id):
             pipeline_jobs[job_id]["match_report_filename"] = match_filename
             log.append({"text": f"🤝 Matchmaking Report Generated: {match_filename}"})
 
+        pipeline_jobs[job_id]["phase"] = "completed"
         log.append({"text": "🎉 Run Complete!"})
         pipeline_jobs[job_id]["status"] = "completed"
 
     except Exception as e:
-        logging.error(f"Pipeline job {job_id} failed: {e}")
+        logging.error(f"Pipeline job {job_id} failed: {e}", exc_info=True)
         log.append({"text": f"❌ Critical Error: {e}"})
         pipeline_jobs[job_id]["status"] = "failed"
-
+        pipeline_jobs[job_id]["phase"] = "error"
 
 def get_unique_pms():
     df, error = load_project_data()
@@ -113,8 +115,6 @@ def load_project_data():
     except Exception as e:
         return pd.DataFrame(), str(e)
 
-# In app.py
-
 def get_ai_boe_estimate(scope, personnel, case_history):
     """
     Calls the deployed DeepSeek model with a specialized prompt and case history.
@@ -127,7 +127,6 @@ def get_ai_boe_estimate(scope, personnel, case_history):
         logging.error("DEEPSEEK environment variables are missing.")
         return {"error": "AI service not configured."}
 
-    # --- THIS IS THE CORRECTED PROMPT ---
     system_prompt = f"""
 You are a specialist in finance and Basis of Estimate (BOE) development for government proposals, specifically for the Department of the Air Force. Your role is to create accurate, auditable, and competitive cost proposals. You must heavily rely on the provided Case History to inform your cost estimates. The current date is {datetime.now().strftime('%A, %B %d, %Y')}.
 
@@ -265,12 +264,19 @@ def api_run_pipeline():
 @app.route('/api/pipeline-status/<job_id>', methods=['GET'])
 def get_pipeline_status(job_id):
     """
-    Returns the status of a background pipeline job.
+    Returns the status and current phase of a background pipeline job.
     """
     job = pipeline_jobs.get(job_id)
     if job is None:
         return jsonify({"status": "not_found"}), 404
-    return jsonify(job)
+    
+    return jsonify({
+        "status": job["status"],
+        "phase": job.get("phase", "unknown"),
+        "log": job.get("log", []),
+        "opps_report_filename": job.get("opps_report_filename"),
+        "match_report_filename": job.get("match_report_filename")
+    })
 
 @app.route('/api/parse-org-chart', methods=['POST'])
 def api_parse_org_chart():
