@@ -123,9 +123,13 @@ def run_scraper_task(scraper_config):
 
 # ------------------ AI CALL ------------------
 async def _chat_with_azure_openai_async(text: str):
-    if not AZURE_OPENAI_ENDPOINT or not AZURE_OPENAI_KEY or not AZURE_OPENAI_DEPLOYMENT:
+    if not all([AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_KEY, AZURE_OPENAI_DEPLOYMENT]):
         logging.error("Missing Azure OpenAI environment variables.")
         return None
+
+    assert AZURE_OPENAI_ENDPOINT is not None
+    assert AZURE_OPENAI_KEY is not None
+    assert AZURE_OPENAI_DEPLOYMENT is not None
 
     try:
         credential = AzureKeyCredential(AZURE_OPENAI_KEY)
@@ -144,7 +148,7 @@ async def _chat_with_azure_openai_async(text: str):
             max_tokens=500,
         )
 
-        if completion.choices and completion.choices[0].message:
+        if completion.choices and completion.choices[0].message and completion.choices[0].message.content:
             return completion.choices[0].message.content.strip()
 
         return ""
@@ -152,7 +156,6 @@ async def _chat_with_azure_openai_async(text: str):
     except Exception as e:
         logging.error(f"Azure OpenAI call failed: {e}", exc_info=True)
         return None
-
 
 def chat_with_azure_openai(text: str):
     """Wrapper to safely call async Azure function from sync code."""
@@ -162,7 +165,6 @@ def chat_with_azure_openai(text: str):
         return asyncio.run(_chat_with_azure_openai_async(text))
     else:
         return loop.run_until_complete(_chat_with_azure_openai_async(text))
-
 
 # ------------------ AI ANALYSIS ------------------
 def analyze_opportunity_with_ai(opportunity, knowledge):
@@ -205,19 +207,19 @@ def analyze_opportunity_with_ai(opportunity, knowledge):
         match = re.search(r'\{.*\}', response, re.DOTALL)
         if match:
             return json.loads(match.group(0))
+        else: 
+            logging.error(f"No JSON found in AI response: {response}")
     except json.JSONDecodeError:
         logging.error(f"Invalid JSON in AI response: {response}")
 
     return {"relevance_score": 0}
 
-
 # ------------------ MAIN PIPELINE ------------------
 def run_wbi_pipeline(log):
-   
     if not all([AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_KEY, AZURE_OPENAI_DEPLOYMENT]):
         log.append({"text": "❌ ERROR: Azure AI environment variables are not set. Halting pipeline."})
         logging.error("Azure AI environment variables are not set.")
-        return pd.DataFrame(), pd.DataFrame() # Return empty dataframes
+        return pd.DataFrame(), pd.DataFrame()
 
     start = time.time()
     log.append({"text": "🚀 Starting Pipeline..."})
@@ -249,41 +251,3 @@ def run_wbi_pipeline(log):
                     all_opps.extend(data)
             except Exception as e:
                 failed.append(name)
-
-    # --- SAM.gov v2 Scraper ---
-    try:
-        sam_opps = fetch_sam_gov_opportunities()
-        all_opps.extend(sam_opps)
-        logging.info(f"SAM.gov returned {len(sam_opps)} opportunities.")
-    except Exception as e:
-        logging.error(f"SAM.gov fetch failed: {e}")
-        failed.append("SAM.gov")
-
-    log.append({"text": f"Found {len(all_opps)} opportunities. Starting AI analysis..."})
-
-    if TESTING_MODE and len(all_opps) > 5:
-        all_opps = all_opps[:5]
-
-    relevant = []
-    with ThreadPoolExecutor(max_workers=10) as pool:
-        futures = {pool.submit(analyze_opportunity_with_ai, o, knowledge): o for o in all_opps}
-        for future in as_completed(futures):
-            opp = futures[future]
-            try:
-                result = future.result()
-                if result.get('relevance_score', 0) >= 0.7:
-                    opp.update(result)
-                    relevant.append(opp)
-            except Exception as e:
-                logging.error(f"Error on AI analysis: {e}")
-
-    df_opps = pd.DataFrame(relevant)
-    if not df_opps.empty:
-        df_opps[COL_IS_NEW] = df_opps[COL_URL].apply(lambda url: url not in seen)
-
-    elapsed = time.time() - start
-    log.append({"text": f"Pipeline finished in {elapsed:.2f} sec."})
-    if failed:
-        log.append({"text": f"❗ Failed scrapers: {', '.join(failed)}"})
-
-    return df_opps, pd.DataFrame()

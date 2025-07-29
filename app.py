@@ -9,16 +9,16 @@ import logging
 import threading
 import uuid
 import re
-from xlsxwriter.workbook import Workbook  
+from xlsxwriter.workbook import Workbook
 from typing import cast
+from fpdf import FPDF
 
 from tools import org_chart_parser
 from tools import wbiops
 
 from azure.storage.blob import BlobServiceClient
-from azure.ai.inference.aio import ChatCompletionsClient
-from azure.ai.inference.models import SystemMessage, UserMessage
-from azure.core.credentials import AzureKeyCredential
+from openai import AsyncAzureOpenAI
+
 
 print("Flask App Loaded. ENV:", os.environ.get("AZURE_STORAGE_CONNECTION_STRING"))
 
@@ -54,7 +54,14 @@ def run_pipeline_logic(job_id):
 
     try:
         pipeline_jobs[job_id]["phase"] = "scraping opportunities"
-        opps_df, matchmaking_df = wbiops.run_wbi_pipeline(log)
+        
+        pipeline_result = wbiops.run_wbi_pipeline(log)
+        
+        if pipeline_result:
+            opps_df, matchmaking_df = pipeline_result
+        else:
+            log.append({"text": "❌ Pipeline did not return valid data."})
+            opps_df, matchmaking_df = pd.DataFrame(), pd.DataFrame()
 
         pipeline_jobs[job_id]["phase"] = "generating reports"
         if not opps_df.empty:
@@ -121,7 +128,7 @@ def get_ai_boe_estimate(scope, personnel, case_history):
     """
     endpoint = os.getenv("DEEPSEEK_AZURE_ENDPOINT")
     api_key = os.getenv("DEEPSEEK_AZURE_KEY")
-    model_name = "WBI-Dash-DeepSeek" 
+    model_name = "WBI-Dash-DeepSeek"
 
     if not endpoint or not api_key:
         logging.error("DEEPSEEK environment variables are missing.")
@@ -132,7 +139,7 @@ You are a specialist in finance and Basis of Estimate (BOE) development for gove
 
 IMPORTANT: Your entire response must be ONLY the valid JSON object requested. Do not include any explanatory text, reasoning, or markdown formatting like ```json before or after the JSON object.
 """
-    
+
     user_prompt = f"""
 **Case History:**
 {case_history if case_history else 'No case history provided.'}
@@ -159,7 +166,7 @@ Generate the complete JSON Basis of Estimate based on the new request, using the
             credential=AzureKeyCredential(str(api_key)),
             api_version="2024-05-01-preview"
         )
-        
+
         response = client.complete(
             model=model_name,
             messages=[
@@ -169,11 +176,9 @@ Generate the complete JSON Basis of Estimate based on the new request, using the
             temperature=0.1,
             max_tokens=4096
         )
-        
+
         if response.choices and response.choices[0].message and response.choices[0].message.content:
             raw_content = response.choices[0].message.content
-            
-            # Use a robust regex to find the JSON block
             match = re.search(r'\{.*\}', raw_content, re.DOTALL)
             if match:
                 try:
@@ -197,9 +202,10 @@ def status():
 def get_improved_ai_summary(description, update):
     endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
     key = os.getenv("AZURE_OPENAI_KEY")
+    deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT")
 
-    if not endpoint or not key or not update:
-        logging.error("Azure OpenAI endpoint/key missing or no update provided.")
+    if not all([endpoint, key, deployment_name]) or not update:
+        logging.error("Azure OpenAI environment variables missing or no update provided.")
         return "Azure OpenAI not configured or no update provided."
 
     system_prompt = """
@@ -207,7 +213,7 @@ You are an expert Project Manager at WBI writing an executive summary for a mont
 
 Crucially, you must explicitly highlight WBI's contributions and role in the progress described. Frame the update from the perspective of what WBI has accomplished or is currently doing.
 """
-    
+
     user_prompt = f"""
 **Project Description (for context):**
 {description}
@@ -219,9 +225,9 @@ Crucially, you must explicitly highlight WBI's contributions and role in the pro
 """
 
     async def call_azure_openai():
+        assert deployment_name is not None
+        
         try:
-            from openai import AsyncAzureOpenAI
-
             client = AsyncAzureOpenAI(
                 azure_endpoint=str(endpoint),
                 api_key=str(key),
@@ -229,16 +235,16 @@ Crucially, you must explicitly highlight WBI's contributions and role in the pro
             )
 
             response = await client.chat.completions.create(
-                model="gpt-4",
+                model=deployment_name,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ]
             )
-            
+
             if response.choices and response.choices[0].message and response.choices[0].message.content:
                 return response.choices[0].message.content.strip()
-            
+
             return "AI returned no content."
 
         except Exception as e:
@@ -253,9 +259,6 @@ Crucially, you must explicitly highlight WBI's contributions and role in the pro
 
 @app.route('/api/run-pipeline', methods=['POST'])
 def api_run_pipeline():
-    """
-    Starts the pipeline in a background thread and returns a job ID.
-    """
     job_id = str(uuid.uuid4())
     thread = threading.Thread(target=run_pipeline_logic, args=(job_id,))
     thread.start()
@@ -263,13 +266,9 @@ def api_run_pipeline():
 
 @app.route('/api/pipeline-status/<job_id>', methods=['GET'])
 def get_pipeline_status(job_id):
-    """
-    Returns the status and current phase of a background pipeline job.
-    """
     job = pipeline_jobs.get(job_id)
     if job is None:
         return jsonify({"status": "not_found"}), 404
-    
     return jsonify({
         "status": job["status"],
         "phase": job.get("phase", "unknown"),
@@ -306,16 +305,13 @@ def api_get_update():
     project_name = request.args.get('projectName')
     month = request.args.get('month')
     year_str = request.args.get('year')
-
     if not project_name or not month or not (year_str and year_str.isdigit()):
         return jsonify({})
-
     year = int(year_str)
     connect_str = os.getenv('AZURE_STORAGE_CONNECTION_STRING')
     if not connect_str:
         logging.error("Azure Storage connection string missing.")
         return jsonify({})
-
     try:
         blob_service_client = BlobServiceClient.from_connection_string(connect_str)
         blob_client = blob_service_client.get_blob_client(BLOB_CONTAINER_NAME, UPDATES_FILE)
@@ -407,12 +403,12 @@ def api_estimate_boe():
     data = request.json
     if not data:
         return jsonify({"error": "Invalid request"}), 400
-    
+
     scope = data.get('originalPrompt')
     personnel = data.get('personnel')
     if not scope or not personnel:
         return jsonify({"error": "Missing scope or personnel"}), 400
-        
+
     case_history = ""
     try:
         history_path = os.path.join(basedir, 'tools', 'wbi_dataset_final.jsonl')
@@ -424,13 +420,13 @@ def api_estimate_boe():
                 case_history += "RESULT:\n" + entry['contents'][1]['parts'][0]['text'] + "\n---\n"
     except Exception as e:
         logging.warning(f"Could not load case history: {e}")
-    
+
     response_data = get_ai_boe_estimate(scope, personnel, case_history)
-    
+
     if "error" in response_data:
         logging.error(f"AI estimation failed with error: {response_data['error']}")
         return jsonify(response_data), 500
-        
+
     return jsonify(response_data)
 
 @app.route('/api/generate-boe-excel', methods=['POST'])
@@ -447,7 +443,7 @@ def generate_boe_excel():
 
     try:
         excel_stream = create_formatted_boe_excel(project_data, totals)
-        
+
         project_title = project_data.get('project_title', 'BoE_Report').replace(' ', '_')
         filename = f"BoE_{project_title}_Full.xlsx"
 
@@ -461,20 +457,40 @@ def generate_boe_excel():
         logging.error(f"Failed to generate BoE Excel file: {e}", exc_info=True)
         return jsonify({"error": "Failed to generate Excel file."}), 500
 
+@app.route('/api/generate-boe-pdf', methods=['POST'])
+def generate_boe_pdf():
+    data = request.json
+    if not data:
+        return jsonify({"error": "Invalid request"}), 400
+
+    project_data = data.get('projectData')
+    totals = data.get('totals')
+    if not project_data or not totals:
+        return jsonify({"error": "Missing project data or totals."}), 400
+
+    try:
+        pdf_stream = create_boe_pdf(project_data, totals)
+
+        project_title = project_data.get('project_title', 'BoE_Report').replace(' ', '_')
+        filename = f"BoE_{project_title}_Customer.pdf"
+
+        return send_file(
+            pdf_stream,
+            as_attachment=True,
+            download_name=filename,
+            mimetype='application/pdf'
+        )
+    except Exception as e:
+        logging.error(f"Failed to generate BoE PDF file: {e}", exc_info=True)
+        return jsonify({"error": "Failed to generate PDF file."}), 500
+
 def create_formatted_boe_excel(project_data, totals):
-    """
-    Creates a multi-sheet, formatted BoE Excel file in memory.
-    """
     output_stream = io.BytesIO()
     with pd.ExcelWriter(output_stream, engine='xlsxwriter', engine_kwargs={"options": {}}) as writer:
         workbook = cast(Workbook, writer.book)
-        
-        # --- Define Formats ---
         title_format = workbook.add_format({'bold': True, 'font_size': 14, 'align': 'left'})
         currency_format = workbook.add_format({'num_format': '$#,##0.00'})
         total_currency_format = workbook.add_format({'num_format': '$#,##0.00', 'bold': True, 'top': 1, 'bottom': 1})
-        
-        # --- Cost Summary Sheet ---
         summary_df = pd.DataFrame([
             {"Cost Element": "Direct Labor", "Amount": totals['laborCost']},
             {"Cost Element": "Materials & Tools", "Amount": totals['materialsCost']},
@@ -495,8 +511,6 @@ def create_formatted_boe_excel(project_data, totals):
         summary_ws.set_column('B:B', 20, currency_format)
         summary_ws.write('B9', totals['totalDirectCosts'], total_currency_format)
         summary_ws.write('B13', totals['totalPrice'], total_currency_format)
-
-        # --- Labor Detail Sheet ---
         if project_data.get('work_plan'):
             labor_data = []
             for task in project_data['work_plan']:
@@ -507,17 +521,76 @@ def create_formatted_boe_excel(project_data, totals):
             labor_df.to_excel(writer, sheet_name='Labor Detail', index=False)
             labor_ws = writer.sheets['Labor Detail']
             labor_ws.set_column('A:A', 40, None)
-
-        # --- Other Detail Sheets ---
         if project_data.get('materials_and_tools'):
             pd.DataFrame(project_data['materials_and_tools']).to_excel(writer, sheet_name='Materials & Tools', index=False)
         if project_data.get('travel'):
             pd.DataFrame(project_data['travel']).to_excel(writer, sheet_name='Travel', index=False)
         if project_data.get('subcontracts'):
             pd.DataFrame(project_data['subcontracts']).to_excel(writer, sheet_name='Subcontracts', index=False)
-            
     output_stream.seek(0)
     return output_stream
+
+def create_boe_pdf(project_data, totals):
+    """
+    Creates a BoE Summary PDF file in memory.
+    """
+    pdf = FPDF()
+    pdf.add_page()
+
+    # Header
+    pdf.set_font("helvetica", "B", 20)
+    pdf.cell(0, 10, "Basis of Estimate", ln=True, align="R")
+    pdf.set_font("helvetica", "", 11)
+
+    # Project Info
+    pdf.set_font("helvetica", "B", 11)
+    pdf.cell(25, 8, "Project:", border=0)
+    pdf.set_font("helvetica", "", 11)
+    pdf.cell(0, 8, project_data.get('project_title', 'N/A'), ln=True)
+
+    pdf.set_font("helvetica", "B", 11)
+    pdf.cell(25, 8, "Date:", border=0)
+    pdf.set_font("helvetica", "", 11)
+    pdf.cell(0, 8, datetime.now().strftime('%Y-%m-%d'), ln=True)
+
+    pdf.ln(10) 
+
+    # Table Data
+    table_data = [
+        ("Direct Labor", f"${totals.get('laborCost', 0):,.2f}"),
+        ("Materials & Tools", f"${totals.get('materialsCost', 0):,.2f}"),
+        ("Travel", f"${totals.get('travelCost', 0):,.2f}"),
+        ("Subcontracts", f"${totals.get('subcontractCost', 0):,.2f}"),
+        ("Total Direct Costs", f"${totals.get('totalDirectCosts', 0):,.2f}"),
+        ("Indirect Costs (O/H + G&A)", f"${totals.get('overheadAmount', 0) + totals.get('gnaAmount', 0):,.2f}"),
+        ("Total Estimated Cost", f"${totals.get('totalCost', 0):,.2f}"),
+        ("Fee", f"${totals.get('feeAmount', 0):,.2f}"),
+        ("Total Proposed Price", f"${totals.get('totalPrice', 0):,.2f}")
+    ]
+
+    # Table Drawing
+    line_height = pdf.font_size * 2
+    col_width = pdf.epw / 2  
+
+    pdf.set_font("helvetica", "B", 11)
+    pdf.cell(col_width, line_height, "Cost Element", border=1)
+    pdf.cell(col_width, line_height, "Amount", border=1, ln=True, align='R')
+    pdf.set_font("helvetica", "", 11)
+
+    for i, (label, value) in enumerate(table_data):
+        # Highlight total rows
+        if "Total" in label:
+            pdf.set_font("helvetica", "B", 11)
+
+        pdf.cell(col_width, line_height, label, border=1)
+        pdf.cell(col_width, line_height, value, border=1, ln=True, align='R')
+
+        # Reset font style
+        pdf.set_font("helvetica", "", 11)
+
+    # Output to a byte stream
+    pdf_stream = io.BytesIO(pdf.output(dest='S'))
+    return pdf_stream
 
 if __name__ == '__main__':
     app.run(debug=True, port=5001, host='0.0.0.0')

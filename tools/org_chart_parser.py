@@ -12,21 +12,26 @@ from openai import AsyncAzureOpenAI
 async def call_azure_ai(prompt_text: str) -> Optional[str]:
     endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
     key = os.getenv("AZURE_OPENAI_KEY")
+    deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT")
 
-    if not endpoint or not key:
+    if not all([endpoint, key, deployment_name]):
         print("[Config Error] Azure OpenAI credentials not configured.")
         return None
+
+    assert endpoint is not None
+    assert key is not None
+    assert deployment_name is not None
 
     try:
         client = AsyncAzureOpenAI(
             azure_endpoint=endpoint,
             api_key=key,
-            api_version="2025-01-01-preview",
-            timeout=90.0  
+            api_version="turbo-2024-04-09",
+            timeout=90.0
         )
 
         response = await client.chat.completions.create(
-            model="gpt-4",
+            model=deployment_name,
             messages=[
                 {"role": "system", "content": "You are an expert data entry assistant for org charts."},
                 {"role": "user", "content": prompt_text}
@@ -34,7 +39,7 @@ async def call_azure_ai(prompt_text: str) -> Optional[str]:
             max_tokens=4096,
             temperature=0.1
         )
-        
+
         if response.choices and response.choices[0].message and response.choices[0].message.content:
             return response.choices[0].message.content.strip()
         return ""

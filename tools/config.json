@@ -75,9 +75,7 @@
       "name": "SAM.gov",
       "function": "fetch_sam_gov_opportunities",
       "requires_driver": false,
-      "args": {
-        "api_key": "YOUR_SAM_API_KEY"
-      }
+      "args": {}
     },
     {
       "name": "NSTXL",

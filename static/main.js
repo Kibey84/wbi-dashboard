@@ -467,59 +467,6 @@ function initializeBoeGenerator() {
 function handleScopeFile(file) {
     const dropZoneText = document.getElementById('drop-zone-text');
     const scopeTextArea = document.getElementById('scope');
-    if(!dropZoneText || !scopeTextArea) return;
-    
-    dropZoneText.textContent = `Processing: ${file.name}...`;
-
-    try {
-        const reader = new FileReader();
-        if (file.type === 'text/plain') {
-            reader.onload = (event) => { scopeTextArea.value = event.target.result; dropZoneText.textContent = `Loaded: ${file.name}`; };
-            reader.readAsText(file);
-        } else if (file.name.endsWith('.docx') && typeof mammoth !== 'undefined') {
-            reader.onload = (event) => {
-                mammoth.extractRawText({ arrayBuffer: event.target.result })
-                    .then(result => { scopeTextArea.value = result.value; dropZoneText.textContent = `Loaded: ${file.name}`; })
-                    .catch(err => { throw err; });
-            };
-            reader.readAsArrayBuffer(file);
-        } else if (file.type === 'application/pdf' && typeof pdfjsLib !== 'undefined') {
-            pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js`;
-            reader.onload = (event) => {
-                const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(event.target.result) });
-                loadingTask.promise.then(pdf => {
-                    const pagePromises = Array.from({ length: pdf.numPages }, (_, i) => pdf.getPage(i + 1).then(page => page.getTextContent()));
-                    Promise.all(pagePromises).then(textContents => {
-                        let fullText = textContents.map(tc => tc.items.map(item => item.str).join(' ')).join('\n');
-                        scopeTextArea.value = fullText;
-                        dropZoneText.textContent = `Loaded: ${file.name}`;
-                    }).catch(err => { throw err; });
-                }).catch(err => { throw err; });
-            };
-            reader.readAsArrayBuffer(file);
-        } else if (file.name.endsWith('.xlsx') && typeof XLSX !== 'undefined') {
-            reader.onload = (event) => {
-                const wb = XLSX.read(event.target.result, { type: 'binary' });
-                let txt = '';
-                wb.SheetNames.forEach(sheetName => { txt += XLSX.utils.sheet_to_csv(wb.Sheets[sheetName]) + '\n'; });
-                scopeTextArea.value = txt;
-                dropZoneText.textContent = `Loaded: ${file.name}`;
-            };
-            reader.readAsBinaryString(file);
-        } else {
-            throw new Error(`Unsupported file type: ${file.type || 'unknown'}.`);
-        }
-        reader.onerror = () => { throw new Error("Error reading file buffer."); };
-    } catch (error) {
-        console.error("File Ingest Error:", error);
-        alert(`Failed to process file. Check console (F12) for details.`);
-        dropZoneText.textContent = "Drag & drop or paste scope";
-    }
-}
-
-function handleScopeFile(file) {
-    const dropZoneText = document.getElementById('drop-zone-text');
-    const scopeTextArea = document.getElementById('scope');
     dropZoneText.textContent = `Processing: ${file.name}...`;
 
     try {
