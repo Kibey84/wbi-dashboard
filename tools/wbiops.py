@@ -123,22 +123,10 @@ def run_scraper_task(scraper_config):
         return [], e
 
 # ------------------ AI CALL ------------------
-async def _chat_with_azure_openai_async(text: str):
-    if not all([AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_KEY, AZURE_OPENAI_DEPLOYMENT]):
-        logging.error("Missing Azure OpenAI environment variables.")
-        return None
-
-    assert AZURE_OPENAI_ENDPOINT is not None
-    assert AZURE_OPENAI_KEY is not None
+async def _chat_with_azure_openai_async(text: str, client: ChatCompletionsClient):
+    """Helper function that takes an initialized client."""
     assert AZURE_OPENAI_DEPLOYMENT is not None
-
     try:
-        credential = AzureKeyCredential(AZURE_OPENAI_KEY)
-        client = ChatCompletionsClient(
-            endpoint=AZURE_OPENAI_ENDPOINT,
-            credential=credential
-        )
-
         completion = await client.complete(
             model=AZURE_OPENAI_DEPLOYMENT,
             messages=[
@@ -148,27 +136,16 @@ async def _chat_with_azure_openai_async(text: str):
             temperature=0.7,
             max_tokens=500,
         )
-
         if completion.choices and completion.choices[0].message and completion.choices[0].message.content:
             return completion.choices[0].message.content.strip()
-
         return ""
-
     except Exception as e:
         logging.error(f"Azure OpenAI call failed: {e}", exc_info=True)
         return None
 
-def chat_with_azure_openai(text: str):
-    """Wrapper to safely call async Azure function from sync code."""
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(_chat_with_azure_openai_async(text))
-    else:
-        return loop.run_until_complete(_chat_with_azure_openai_async(text))
-
 # ------------------ AI ANALYSIS ------------------
-def analyze_opportunity_with_ai(opportunity, knowledge):
+async def analyze_opportunity_with_ai(opportunity, knowledge, client):
+    """Async version of the analysis function."""
     text = f"""
     Title: {opportunity.get('Title', '')}
     Description: {opportunity.get('Description', '')}
@@ -195,11 +172,7 @@ def analyze_opportunity_with_ai(opportunity, knowledge):
     "suggested_internal_lead".
     """
 
-    try:
-        response = chat_with_azure_openai(user_prompt)
-    except Exception as e:
-        logging.error(f"AI call failed: {e}", exc_info=True)
-        return {"relevance_score": 0}
+    response = await _chat_with_azure_openai_async(user_prompt, client)
 
     if not response:
         return {"relevance_score": 0}
@@ -255,18 +228,26 @@ def run_wbi_pipeline(log):
 
     log.append({"text": f"Found {len(all_opps)} opportunities. Starting AI analysis..."})
 
+    # --- EFFICIENT ASYNC AI ANALYSIS BLOCK ---
     relevant = []
-    with ThreadPoolExecutor(max_workers=10) as pool:
-        futures = {pool.submit(analyze_opportunity_with_ai, o, knowledge): o for o in all_opps}
-        for future in as_completed(futures):
-            opp = futures[future]
-            try:
-                result = future.result()
-                if result and result.get('relevance_score', 0) >= 0.7:
-                    opp.update(result)
-                    relevant.append(opp)
-            except Exception as e:
-                logging.error(f"Error on AI analysis: {e}")
+
+    async def main_analysis():
+        assert AZURE_OPENAI_ENDPOINT is not None
+        assert AZURE_OPENAI_KEY is not None
+        credential = AzureKeyCredential(AZURE_OPENAI_KEY)
+        client = ChatCompletionsClient(endpoint=AZURE_OPENAI_ENDPOINT, credential=credential)
+
+        tasks = [analyze_opportunity_with_ai(opp, knowledge, client) for opp in all_opps]
+        
+        results = await asyncio.gather(*tasks)
+
+        for i, result in enumerate(results):
+            if result and result.get('relevance_score', 0) >= 0.7:
+                opp = all_opps[i]
+                opp.update(result)
+                relevant.append(opp)
+    
+    asyncio.run(main_analysis())
 
     df_opps = pd.DataFrame(relevant)
     if not df_opps.empty:
