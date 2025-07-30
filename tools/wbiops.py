@@ -255,11 +255,6 @@ def run_wbi_pipeline(log):
 
     log.append({"text": f"Found {len(all_opps)} opportunities. Starting AI analysis..."})
 
-    # --- DIAGNOSTIC TEST: Limit items to prevent resource exhaustion ---
-    if len(all_opps) > 20:
-        log.append({"text": f"TESTING: Limiting {len(all_opps)} items to 20 to check resource limits."})
-        all_opps = all_opps[:20]
-
     relevant = []
     with ThreadPoolExecutor(max_workers=10) as pool:
         futures = {pool.submit(analyze_opportunity_with_ai, o, knowledge): o for o in all_opps}
