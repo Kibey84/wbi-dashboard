@@ -18,25 +18,26 @@ from azure.ai.inference.models import SystemMessage, UserMessage
 from azure.core.credentials import AzureKeyCredential
 
 # --- All Module Imports ---
-#from .dod_sbir_scraper import fetch_dod_sbir_sttr_topics
-#from .nasa_sbir_module import fetch_nasa_sbir_opportunities
-#from .darpa_module import fetch_darpa_opportunities
-#from .arpah_module import fetch_arpah_opportunities
-#from .eureka_module import fetch_eureka_opportunities
-#from .nsin_module import fetch_nsin_opportunities
-#from .nih_sbir_module import fetch_nih_sbir_opportunities
-#from .nstxl_module import fetch_nstxl_opportunities
-#from .mtec_module import fetch_mtec_opportunities
-#from .afwerx_module import fetch_afwerx_opportunities
-#from .diu_scraper import fetch_diu_opportunities
-#from .socom_baa_module import fetch_socom_opportunities
-#from .arl_opportunities_module import fetch_arl_opportunities
-#from .nasc_solutions_module import fetch_nasc_opportunities
-#from .osti_foa_module import fetch_osti_foas
-#from .arpae_scraper import fetch_arpae_opportunities
-#from .iarpa_scraper import fetch_iarpa_opportunities
-#from .sbir_pipeline_scraper import fetch_sbir_partnership_opportunities
-from .sam_gov_api_module import fetch_sam_gov_opportunities  
+# NOTE: Make sure to uncomment the scrapers you want to run
+# from .dod_sbir_scraper import fetch_dod_sbir_sttr_topics
+# from .nasa_sbir_module import fetch_nasa_sbir_opportunities
+# from .darpa_module import fetch_darpa_opportunities
+# from .arpah_module import fetch_arpah_opportunities
+# from .eureka_module import fetch_eureka_opportunities
+# from .nsin_module import fetch_nsin_opportunities
+# from .nih_sbir_module import fetch_nih_sbir_opportunities
+# from .nstxl_module import fetch_nstxl_opportunities
+# from .mtec_module import fetch_mtec_opportunities
+# from .afwerx_module import fetch_afwerx_opportunities
+# from .diu_scraper import fetch_diu_opportunities
+# from .socom_baa_module import fetch_socom_opportunities
+# from .arl_opportunities_module import fetch_arl_opportunities
+# from .nasc_solutions_module import fetch_nasc_opportunities
+# from .osti_foa_module import fetch_osti_foas
+# from .arpae_scraper import fetch_arpae_opportunities
+# from .iarpa_scraper import fetch_iarpa_opportunities
+# from .sbir_pipeline_scraper import fetch_sbir_partnership_opportunities
+from .sam_gov_api_module import fetch_sam_gov_opportunities
 
 TESTING_MODE = False
 
@@ -207,7 +208,7 @@ def analyze_opportunity_with_ai(opportunity, knowledge):
         match = re.search(r'\{.*\}', response, re.DOTALL)
         if match:
             return json.loads(match.group(0))
-        else: 
+        else:
             logging.error(f"No JSON found in AI response: {response}")
     except json.JSONDecodeError:
         logging.error(f"Invalid JSON in AI response: {response}")
@@ -251,3 +252,35 @@ def run_wbi_pipeline(log):
                     all_opps.extend(data)
             except Exception as e:
                 failed.append(name)
+
+    log.append({"text": f"Found {len(all_opps)} opportunities. Starting AI analysis..."})
+
+    # --- DIAGNOSTIC TEST: Limit items to prevent resource exhaustion ---
+    if len(all_opps) > 20:
+        log.append({"text": f"TESTING: Limiting {len(all_opps)} items to 20 to check resource limits."})
+        all_opps = all_opps[:20]
+
+    relevant = []
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = {pool.submit(analyze_opportunity_with_ai, o, knowledge): o for o in all_opps}
+        for future in as_completed(futures):
+            opp = futures[future]
+            try:
+                result = future.result()
+                if result and result.get('relevance_score', 0) >= 0.7:
+                    opp.update(result)
+                    relevant.append(opp)
+            except Exception as e:
+                logging.error(f"Error on AI analysis: {e}")
+
+    df_opps = pd.DataFrame(relevant)
+    if not df_opps.empty:
+        df_opps[COL_IS_NEW] = df_opps[COL_URL].apply(lambda url: url not in seen)
+        save_new_urls(df_opps)
+
+    elapsed = time.time() - start
+    log.append({"text": f"Pipeline finished in {elapsed:.2f} sec."})
+    if failed:
+        log.append({"text": f"❗ Failed scrapers: {', '.join(failed)}"})
+
+    return df_opps, pd.DataFrame(sbir_partners)
