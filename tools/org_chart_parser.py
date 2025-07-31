@@ -26,7 +26,7 @@ async def call_azure_ai(prompt_text: str) -> Optional[str]:
         client = AsyncAzureOpenAI(
             azure_endpoint=endpoint,
             api_key=key,
-            api_version="turbo-2024-04-09",
+            api_version="2024-02-01",
             timeout=90.0
         )
 
