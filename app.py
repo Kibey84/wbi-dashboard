@@ -285,8 +285,9 @@ def api_parse_org_chart():
     try:
         output_filename = org_chart_parser.process_uploaded_pdf(file, REPORTS_DIR)
         return jsonify({"success": True, "filename": output_filename}) if output_filename else jsonify({"error": "Processing failed"}), 500
-    except Exception:
-        return jsonify({"error": "Internal server error"}), 500
+    except Exception as e:
+        logging.error(f"Org chart parsing failed: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error. Check logs for details."}), 500
 
 @app.route('/api/pms')
 def api_get_pms():
