@@ -16,6 +16,7 @@ import inspect
 from azure.ai.inference.aio import ChatCompletionsClient
 from azure.ai.inference.models import SystemMessage, UserMessage
 from azure.core.credentials import AzureKeyCredential
+from openai import AsyncAzureOpenAI
 
 # --- All Module Imports ---
 # NOTE: Make sure to uncomment the scrapers you want to run
@@ -122,30 +123,9 @@ def run_scraper_task(scraper_config):
         logging.error(f"Scraper failed for {name}: {e}", exc_info=True)
         return [], e
 
-# ------------------ AI CALL ------------------
-async def _chat_with_azure_openai_async(text: str, client: ChatCompletionsClient):
-    """Helper function that takes an initialized client."""
-    assert AZURE_OPENAI_DEPLOYMENT is not None
-    try:
-        completion = await client.complete(
-            model=AZURE_OPENAI_DEPLOYMENT,
-            messages=[
-                SystemMessage(content="You are a helpful assistant."),
-                UserMessage(content=text)
-            ],
-            temperature=0.7,
-            max_tokens=500,
-        )
-        if completion.choices and completion.choices[0].message and completion.choices[0].message.content:
-            return completion.choices[0].message.content.strip()
-        return ""
-    except Exception as e:
-        logging.error(f"Azure OpenAI call failed: {e}", exc_info=True)
-        return None
-
-# ------------------ AI ANALYSIS ------------------
-async def analyze_opportunity_with_ai(opportunity, knowledge, client):
-    """Async version of the analysis function."""
+# ------------------ AI ANALYSIS (REFACTORED with stable 'openai' library) ------------------
+async def analyze_opportunity_with_ai(opportunity, knowledge, client: AsyncAzureOpenAI):
+    """Async analysis function that uses the stable openai client."""
     text = f"""
     Title: {opportunity.get('Title', '')}
     Description: {opportunity.get('Description', '')}
@@ -155,40 +135,49 @@ async def analyze_opportunity_with_ai(opportunity, knowledge, client):
     POC: {json.dumps(opportunity.get('POC', []), indent=2) if opportunity.get('POC') else "N/A"}
     """
     if not text.strip():
-        return {"relevance_score": 0}
+        return None 
 
     user_prompt = f"""
     WBI CAPABILITIES: --- {knowledge} ---
-
     OPPORTUNITY DATA:
     {text}
-
     TASK:
     Assess this opportunity for WBI relevance. Return ONLY valid JSON with keys:
-    "relevance_score" (0-1), 
-    "justification", 
-    "related_experience", 
-    "funding_assessment", 
-    "suggested_internal_lead".
+    "relevance_score" (0-1), "justification", "related_experience", 
+    "funding_assessment", "suggested_internal_lead".
     """
 
-    response = await _chat_with_azure_openai_async(user_prompt, client)
-
-    if not response:
-        return {"relevance_score": 0}
-
     try:
-        match = re.search(r'\{.*\}', response, re.DOTALL)
+        assert AZURE_OPENAI_DEPLOYMENT is not None
+        response = await client.chat.completions.create(
+            model=AZURE_OPENAI_DEPLOYMENT,
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.7,
+            max_tokens=500,
+        )
+        
+        content = response.choices[0].message.content if response.choices and response.choices[0].message else ""
+        if not content:
+            return None
+
+        match = re.search(r'\{.*\}', content, re.DOTALL)
         if match:
-            return json.loads(match.group(0))
+            result_json = json.loads(match.group(0))
+            result_json['original_opportunity'] = opportunity
+            return result_json
         else:
-            logging.error(f"No JSON found in AI response: {response}")
-    except json.JSONDecodeError:
-        logging.error(f"Invalid JSON in AI response: {response}")
+            logging.error(f"No JSON found in AI response: {content}")
+            return None
 
-    return {"relevance_score": 0}
+    except Exception as e:
+        logging.error(f"AI call failed for opportunity {opportunity.get('Title')}: {e}", exc_info=False)
+        return None
 
-# ------------------ MAIN PIPELINE ------------------
+
+# ------------------ MAIN PIPELINE (REFACTORED WITH BATCHING) ------------------
 def run_wbi_pipeline(log):
     if not all([AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_KEY, AZURE_OPENAI_DEPLOYMENT]):
         log.append({"text": "❌ ERROR: Azure AI environment variables are not set. Halting pipeline."})
@@ -228,26 +217,37 @@ def run_wbi_pipeline(log):
 
     log.append({"text": f"Found {len(all_opps)} opportunities. Starting AI analysis..."})
 
-    # --- EFFICIENT ASYNC AI ANALYSIS BLOCK ---
+    # --- EFFICIENT ASYNC AI ANALYSIS WITH BATCHING ---
     relevant = []
+    BATCH_SIZE = 20 
 
     async def main_analysis():
         assert AZURE_OPENAI_ENDPOINT is not None
         assert AZURE_OPENAI_KEY is not None
-        credential = AzureKeyCredential(AZURE_OPENAI_KEY)
-        client = ChatCompletionsClient(endpoint=AZURE_OPENAI_ENDPOINT, credential=credential)
-
-        tasks = [analyze_opportunity_with_ai(opp, knowledge, client) for opp in all_opps]
         
-        results = await asyncio.gather(*tasks)
+        client = AsyncAzureOpenAI(
+            azure_endpoint=AZURE_OPENAI_ENDPOINT,
+            api_key=AZURE_OPENAI_KEY,
+            api_version="2024-02-01"
+        )
 
-        for i, result in enumerate(results):
-            if result and result.get('relevance_score', 0) >= 0.7:
-                opp = all_opps[i]
-                opp.update(result)
-                relevant.append(opp)
-    
+        for i in range(0, len(all_opps), BATCH_SIZE):
+            batch_opps = all_opps[i:i + BATCH_SIZE]
+            log.append({"text": f"Analyzing batch {i//BATCH_SIZE + 1} of {len(all_opps)//BATCH_SIZE + 1}..."})
+            
+            tasks = [analyze_opportunity_with_ai(opp, knowledge, client) for opp in batch_opps]
+            results = await asyncio.gather(*tasks)
+
+            for result in results:
+                if result and result.get('relevance_score', 0) >= 0.7:
+                    opp = result.pop('original_opportunity') 
+                    opp.update(result)
+                    relevant.append(opp)
+            
+            await asyncio.sleep(1)
+
     asyncio.run(main_analysis())
+    # --- END OF BATCHING BLOCK ---
 
     df_opps = pd.DataFrame(relevant)
     if not df_opps.empty:
