@@ -42,6 +42,7 @@ def fetch_sam_gov_opportunities() -> list:
 
     # Pull key from Azure env
     api_key = os.getenv("SAM_GOV_API_KEY")
+    module_logger.info(f"SAM.gov API key loaded? {'YES' if api_key else 'NO'}")
     if not api_key or api_key.strip() == "":
         module_logger.error("❌ SAM.gov API key not set in environment. Skipping SAM.gov scrape.")
         return []
