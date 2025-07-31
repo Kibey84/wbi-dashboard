@@ -19,7 +19,6 @@ from azure.core.credentials import AzureKeyCredential
 from openai import AsyncAzureOpenAI
 
 # --- All Module Imports ---
-# NOTE: Make sure to uncomment the scrapers you want to run
 # from .dod_sbir_scraper import fetch_dod_sbir_sttr_topics
 # from .nasa_sbir_module import fetch_nasa_sbir_opportunities
 # from .darpa_module import fetch_darpa_opportunities
@@ -37,7 +36,7 @@ from openai import AsyncAzureOpenAI
 # from .osti_foa_module import fetch_osti_foas
 # from .arpae_scraper import fetch_arpae_opportunities
 # from .iarpa_scraper import fetch_iarpa_opportunities
-# from .sbir_pipeline_scraper import fetch_sbir_partnership_opportunities
+from .sbir_pipeline_scraper import fetch_sbir_partnership_opportunities
 from .sam_gov_api_module import fetch_sam_gov_opportunities
 
 TESTING_MODE = False
