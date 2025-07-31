@@ -48,7 +48,7 @@ async def get_ai_research_summary(company_name):
         client = AsyncAzureOpenAI(
             azure_endpoint=str(AZURE_OPENAI_ENDPOINT),
             api_key=str(AZURE_OPENAI_KEY),
-            api_version="2024-02-01"
+            api_version="turbo-2024-04-09"
         )
         result = await client.chat.completions.create(
             model=str(AZURE_OPENAI_DEPLOYMENT),

@@ -22,7 +22,6 @@ from azure.ai.inference.models import SystemMessage, UserMessage
 from azure.core.credentials import AzureKeyCredential
 
 # ====== CONFIGURATION & CONSTANTS ======
-load_dotenv("samgovkey.env")
 AZURE_AI_ENDPOINT = os.getenv("AZURE_AI_ENDPOINT")
 AZURE_AI_KEY = os.getenv("AZURE_AI_KEY")
 AZURE_AI_MODEL_NAME = os.getenv("AZURE_OPENAI_MODEL", "gpt-4")
