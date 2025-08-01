@@ -81,13 +81,13 @@ def process_and_save_data(df: pd.DataFrame, filename: str) -> None:
             worksheet = writer.sheets['Discovered SBIRs']
             currency_format = workbook.add_format({'num_format': '$#,##0'}) # type: ignore
 
-            title_col_idx = excel_df.columns.get_loc('Award Title')
+            title_col_idx = excel_df.columns.get_loc('award_title')
             url_col_idx = excel_df.columns.get_loc('award_link')
             amount_col_idx = excel_df.columns.get_loc('award_amount')
 
             for row_num, row in enumerate(excel_df.itertuples(), 1):
                 link_url = str(getattr(row, 'award_link', ''))
-                title_string = str(getattr(row, 'Award Title', ''))
+                title_string = str(getattr(row, 'award_title', ''))
 
                 if link_url.startswith(('http://', 'https://')):
                     worksheet.write_url(row_num, title_col_idx, link_url, string=title_string)

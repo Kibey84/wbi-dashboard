@@ -7,7 +7,6 @@ from datetime import datetime
 import json
 import re
 from docx import Document
-
 from openai import AsyncAzureOpenAI
 
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
@@ -21,7 +20,6 @@ INPUT_FILENAME = "Discovered Companies.xlsx"
 OUTPUT_FOLDER = "company_dossiers"
 LOG_FILENAME = "sbir_research_log.txt"
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
-
 def clean_ai_response(text):
     patterns_to_remove = [
         r"^\s*Okay,.*?dossier\s*\n", r"^\s*Here is the dossier:?\s*\n",
@@ -129,7 +127,6 @@ async def run_phase_2():
     logging.info("--- Phase 2 Started ---")
     await run_research_and_generate_dossiers(INPUT_FILENAME)
     logging.info("--- Phase 2 Complete ---")
-# ---------------------------------
 
 if __name__ == "__main__":
     logging.basicConfig(
