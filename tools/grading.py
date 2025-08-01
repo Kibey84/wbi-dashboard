@@ -27,10 +27,10 @@ AZURE_AI_KEY = os.getenv("AZURE_AI_KEY")
 AZURE_AI_MODEL_NAME = os.getenv("AZURE_OPENAI_MODEL", "gpt-4")
 
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
-DOSSIER_FOLDER = os.path.join(TOOLS_DIR, "company_dossiers")
-OUTPUT_FILENAME = os.path.join(TOOLS_DIR, "sbir_top_30_ranked.docx")
+DOSSIER_FOLDER = "company_dossiers"
+OUTPUT_FILENAME = "sbir_top_30_ranked.docx"
 LOG_FILENAME = os.path.join(TOOLS_DIR, "sbir_grading_log.txt")
-COMPANY_DATA_SOURCE_FILE = os.path.join(TOOLS_DIR, "Discovered Companies.xlsx")
+COMPANY_DATA_SOURCE_FILE = "Discovered Companies.xlsx"
 
 MAX_RANKING_LIMIT = 30
 GRADING_WEIGHTS = {
