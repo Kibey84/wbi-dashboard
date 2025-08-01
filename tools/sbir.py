@@ -100,6 +100,8 @@ def process_and_save_data(data: list[dict], filename: str) -> None:
             for row_num, link_url in enumerate(df['award_link'], 1):
                 title_string = df.iloc[row_num - 1]['Award Title']
                 if pd.notna(link_url):
+                    if not isinstance(link_url, str):
+                        link_url = str(link_url)
                     worksheet.write_url(row_num, title_col_idx, link_url, string=str(title_string))
             worksheet.set_column(amount_col_idx, amount_col_idx, 15, currency_format)
             for idx, col in enumerate(excel_df.columns):
