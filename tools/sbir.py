@@ -3,6 +3,8 @@ import pandas as pd
 import time
 import logging
 from datetime import datetime
+import os
+from xlsxwriter.utility import xl_rowcol_to_cell
 
 # --- Configuration ---
 START_YEAR = datetime.now().year - 1 
@@ -10,124 +12,126 @@ CURRENT_YEAR = datetime.now().year
 OUTPUT_FILENAME = "Discovered Companies.xlsx"
 LOG_FILENAME = "sbir_tool_log.txt"
 
-def fetch_awards_by_year(start_year: int) -> list[dict]:
+def fetch_awards_by_year(year: int) -> list[dict]:
     """
-    Fetches all Phase II DoD SBIR award data from the SBIR.gov API.
-    Now starts from the specified start_year instead of a hardcoded one.
+    Fetches all Phase II DoD SBIR award data for a specific year from the SBIR.gov API.
     """
     base_url = "https://api.www.sbir.gov/public/api/awards"
-    all_awards = []
+    year_awards = []
+    start_index = 0
+    rows_per_request = 100
+    logging.info(f"--- Fetching awards for year: {year} ---")
     
-    logging.info(f"--- Fetching Phase II DOD SBIR awards for years {start_year}-{CURRENT_YEAR} ---")
-
-    for year in range(start_year, CURRENT_YEAR + 1):
-        start_index = 0
-        rows_per_request = 100
-        logging.info(f"--- Fetching awards for year: {year} ---")
-        
-        while True:
-            params = {
-                'agency': 'DOD', 
-                'year': year, 
-                'phase': 'Phase II',
-                'program': 'SBIR',
-                'start': start_index, 
-                'rows': rows_per_request
-            }
-            try:
-                response = requests.get(base_url, params=params)
-                response.raise_for_status()
-                data = response.json()
-                
-                if not data:
-                    logging.info(f"No more awards found for {year}.")
-                    break
-                
-                all_awards.extend(data)
-                logging.info(f"Fetched {len(data)} awards. Total retrieved so far: {len(all_awards)}")
-                start_index += rows_per_request
-                time.sleep(0.5)
-
-            except requests.exceptions.RequestException as e:
-                logging.error(f"An API error occurred for year {year}: {e}")
+    while True:
+        params = {
+            'agency': 'DOD', 
+            'year': year, 
+            'phase': 'Phase II',
+            'program': 'SBIR',
+            'start': start_index, 
+            'rows': rows_per_request
+        }
+        try:
+            response = requests.get(base_url, params=params)
+            response.raise_for_status()
+            data = response.json()
+            
+            if not data:
+                logging.info(f"No more awards found for {year}.")
                 break
+            
+            year_awards.extend(data)
+            logging.info(f"Fetched {len(data)} awards. Total retrieved for year {year}: {len(year_awards)}")
+            start_index += rows_per_request
+            time.sleep(0.5)
+
+        except requests.exceptions.RequestException as e:
+            logging.error(f"An API error occurred for year {year}: {e}")
+            break
+            
+    return year_awards
+
+def fetch_all_awards() -> list[dict]:
+    """
+    Fetches SBIR awards for all specified years and combines them.
+    """
+    all_awards = []
+    years_to_fetch = range(START_YEAR, CURRENT_YEAR + 1)
+
+    logging.info(f"--- Fetching Phase II DOD SBIR awards for years {START_YEAR}-{CURRENT_YEAR} ---")
+    
+    for year in years_to_fetch:
+        awards_for_year = fetch_awards_by_year(year)
+        all_awards.extend(awards_for_year)
             
     return all_awards
 
-def process_and_save_data(data: list[dict], filename: str) -> None:
+def process_and_save_data(df: pd.DataFrame, filename: str) -> None:
     """
-    Processes the raw award data and saves it to a formatted Excel file.
-    (This function remains the same as the last corrected version)
+    Processes the DataFrame and saves it as a formatted Excel file.
     """
-    if not data:
-        logging.warning("No data was provided to process and save.")
-        return
-        
-    logging.info(f"\nProcessing {len(data)} total awards...")
-    df = pd.DataFrame(data)
-    df = df[df['program'] == 'SBIR'].copy()
-    logging.info(f"Filtered down to {len(df)} SBIR-only awards.")
-
-    columns_to_drop = [
-        'agency', 'agency_tracking_number', 'solicitation_number', 'solicitation_year',
-        'topic_code', 'award_year', 'duns', 'uei', 'abstract', 'pi_name',
-        'pi_email', 'pi_phone', 'research_institution', 'ri_duns', 'ri_uei',
-        'hubzone_owned', 'socially_economically_disadvantaged', 'woman_owned', 'firm_woman_owned',
-        'poc_name', 'poc_email', 'poc_phone', 'poc_title', 'firm_hubzone_owned',
-        'firm_socially_economically_disadvantaged', 'firm_number_awards',
-        'number_awards', 'employee_count', 'number_employees', 'veteran_owned',
-        'pi_title', 'ri_name', 'ri_poc_name', 'ri_poc_phone'
-    ]
-    df.drop(columns=columns_to_drop, inplace=True, errors='ignore')
-
-    if 'proposal_award_date' in df.columns:
-        df['proposal_award_date'] = pd.to_datetime(df['proposal_award_date'], errors='coerce').dt.date
-
-    df['Company_Award_Count'] = df.groupby('firm')['firm'].transform('size')
-    df = df.sort_values(by=['Company_Award_Count', 'proposal_award_date'], ascending=[False, False])
-    df.rename(columns={'award_title': 'Award Title', 'link': 'award_link'}, inplace=True)
-
     logging.info(f"Saving processed data to {filename}...")
     try:
-        excel_df = df.drop(columns=['award_link'], errors='ignore')
+        excel_df = df.copy()
+
         with pd.ExcelWriter(filename, engine='xlsxwriter') as writer:
             excel_df.to_excel(writer, sheet_name='Discovered SBIRs', index=False)
+            
             workbook  = writer.book
             worksheet = writer.sheets['Discovered SBIRs']
-            currency_format = workbook.add_format({'num_format': '$#,##0.00'}) # type: ignore
+            currency_format = workbook.add_format({'num_format': '$#,##0'}) # type: ignore
+
             title_col_idx = excel_df.columns.get_loc('Award Title')
+            url_col_idx = excel_df.columns.get_loc('award_link')
             amount_col_idx = excel_df.columns.get_loc('award_amount')
-            for row_num, link_url in enumerate(df['award_link'], 1):
-                title_string = df.iloc[row_num - 1]['Award Title']
-                if pd.notna(link_url):
-                    if not isinstance(link_url, str):
-                        link_url = str(link_url)
-                    worksheet.write_url(row_num, title_col_idx, link_url, string=str(title_string))
-            worksheet.set_column(amount_col_idx, amount_col_idx, 15, currency_format)
+
+            for row_num, row in enumerate(excel_df.itertuples(), 1):
+                link_url = str(getattr(row, 'award_link', ''))
+                title_string = str(getattr(row, 'Award Title', ''))
+
+                if link_url.startswith(('http://', 'https://')):
+                    worksheet.write_url(row_num, title_col_idx, link_url, string=title_string)
+                else:
+                    worksheet.write(row_num, title_col_idx, title_string)
+
             for idx, col in enumerate(excel_df.columns):
-                if idx == amount_col_idx: continue
                 series = excel_df[col]
-                max_len = max((series.astype(str).map(len).max(), len(str(series.name)))) + 2
-                worksheet.set_column(idx, idx, max_len)
+                max_len = max((
+                    series.astype(str).map(len).max(),
+                    len(str(series.name))
+                )) + 2
+                
+                if idx == amount_col_idx:
+                    worksheet.set_column(idx, idx, max_len, currency_format)
+                else:
+                    worksheet.set_column(idx, idx, max_len)
+
         logging.info(f"Successfully saved data to {filename}")
     except Exception as e:
         logging.error(f"Failed to save Excel file: {e}", exc_info=True)
 
 def run_phase_1(testing_mode=False):
-    """ Main execution function for Phase 1. """
+    """
+    Main function to run the scraping and processing for Phase 1.
+    """
     logging.info("--- SBIR Award Scraper and Processor (Phase 1) Started ---")
     
-    # If testing, just use the current year to go even faster
-    start_year_to_fetch = CURRENT_YEAR if testing_mode else START_YEAR
+    all_awards = fetch_all_awards() 
+    if not all_awards:
+        logging.warning("No awards found to process.")
+        return
+
+    df = pd.DataFrame(all_awards)
     
-    awards_data = fetch_awards_by_year(start_year_to_fetch)
-    if awards_data:
-        process_and_save_data(awards_data, OUTPUT_FILENAME)
-    else:
-        logging.warning("Phase 1 finished, but no awards were fetched.")
+    if 'program' in df.columns:
+        initial_count = len(df)
+        df = df[df['program'] == 'SBIR'].copy()
+        logging.info(f"Filtered down to {len(df)} SBIR-only awards from {initial_count} total.")
+
+    process_and_save_data(df, OUTPUT_FILENAME)
+
     logging.info("--- Phase 1 Script Finished ---")
 
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[logging.FileHandler(LOG_FILENAME, mode='w'), logging.StreamHandler()], force=True)
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
     run_phase_1()
