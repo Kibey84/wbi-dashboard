@@ -222,7 +222,7 @@ def run_wbi_pipeline(log):
 
     # --- EFFICIENT ASYNC AI ANALYSIS WITH BATCHING ---
     relevant = []
-    BATCH_SIZE = 10
+    BATCH_SIZE = 5
 
     async def main_analysis():
         assert AZURE_OPENAI_ENDPOINT is not None
