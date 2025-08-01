@@ -32,7 +32,7 @@ else:
             return []
 
         logging.info("[SBIR PIPELINE] Reading generated Word dossiers...")
-        dossier_folder = 'dossiers'
+        dossier_folder = 'company_dossiers'
         if not os.path.isdir(dossier_folder):
             logging.error(f"[SBIR PIPELINE] Dossier folder '{dossier_folder}' not found.")
             return []

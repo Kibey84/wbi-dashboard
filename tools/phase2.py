@@ -20,6 +20,7 @@ if not (AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_KEY and AZURE_OPENAI_DEPLOYMENT):
 INPUT_FILENAME = "Discovered Companies.xlsx"
 OUTPUT_FOLDER = "company_dossiers"
 LOG_FILENAME = "sbir_research_log.txt"
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
 def clean_ai_response(text):
     patterns_to_remove = [
