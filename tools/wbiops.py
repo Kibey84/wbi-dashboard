@@ -196,7 +196,11 @@ def run_wbi_pipeline(log):
     sbir_partners = []
     sbir_conf = next((c for c in config if c['name'] == 'SBIR Partnerships'), None)
     if sbir_conf:
+        log.append({"text": "🔎 Running SBIR Partnerships scraper..."})
         sbir_partners, _ = run_scraper_task(sbir_conf)
+        log.append({"text": f"✅ SBIR Partnerships scraper finished. Found {len(sbir_partners)} items."})
+    else:
+        log.append({"text": "⚠️ SBIR Partnerships scraper not found in config."})
 
     direct_scrapers = [c for c in config if c['name'] != 'SBIR Partnerships' and c.get('enabled', True)]
     all_opps, failed = [], []
