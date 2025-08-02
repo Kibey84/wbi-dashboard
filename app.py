@@ -19,6 +19,13 @@ from tools import wbiops
 from azure.storage.blob import BlobServiceClient
 from openai import AsyncAzureOpenAI
 
+from azure.ai.inference.aio import ChatCompletionsClient
+from azure.ai.inference.models import SystemMessage, UserMessage
+from azure.core.credentials import AzureKeyCredential
+
+DEEPSEEK_ENDPOINT = os.getenv("DEEPSEEK_AZURE_ENDPOINT")
+DEEPSEEK_KEY = os.getenv("DEEPSEEK_AZURE_KEY")
+DEEPSEEK_DEPLOYMENT = "WBI-Dash-DeepSeek"
 
 print("Flask App Loaded. ENV:", os.environ.get("AZURE_STORAGE_CONNECTION_STRING"))
 
@@ -122,84 +129,10 @@ def load_project_data():
     except Exception as e:
         return pd.DataFrame(), str(e)
 
-def get_ai_boe_estimate(scope, personnel, case_history):
-    """
-    Calls the deployed DeepSeek model with a specialized prompt and case history.
-    """
-    endpoint = os.getenv("DEEPSEEK_AZURE_ENDPOINT")
-    api_key = os.getenv("DEEPSEEK_AZURE_KEY")
-    model_name = "WBI-Dash-DeepSeek"
+def get_ai_summary(description, update):
+    return asyncio.run(get_improved_ai_summary(description, update))
 
-    if not endpoint or not api_key:
-        logging.error("DEEPSEEK environment variables are missing.")
-        return {"error": "AI service not configured."}
-
-    system_prompt = f"""
-You are a specialist in finance and Basis of Estimate (BOE) development for government proposals, specifically for the Department of the Air Force. Your role is to create accurate, auditable, and competitive cost proposals. You must heavily rely on the provided Case History to inform your cost estimates. The current date is {datetime.now().strftime('%A, %B %d, %Y')}.
-
-IMPORTANT: Your entire response must be ONLY the valid JSON object requested. Do not include any explanatory text, reasoning, or markdown formatting like ```json before or after the JSON object.
-"""
-
-    user_prompt = f"""
-**Case History:**
-{case_history if case_history else 'No case history provided.'}
----
-**New Request:**
-
-**Scope of Work:**
-{scope}
-
-**Available Personnel Roles:**
-{', '.join(personnel)}
----
-**Your Task:**
-Generate the complete JSON Basis of Estimate based on the new request, using the case history as your primary guide. The JSON object must have keys: "work_plan", "materials_and_tools", "travel", and "subcontracts". Provide ONLY the JSON object.
-"""
-
-    try:
-        from azure.ai.inference import ChatCompletionsClient
-        from azure.ai.inference.models import SystemMessage, UserMessage
-        from azure.core.credentials import AzureKeyCredential
-
-        client = ChatCompletionsClient(
-            endpoint=str(endpoint),
-            credential=AzureKeyCredential(str(api_key)),
-            api_version="2024-05-01-preview"
-        )
-
-        response = client.complete(
-            model=model_name,
-            messages=[
-                SystemMessage(content=system_prompt),
-                UserMessage(content=user_prompt)
-            ],
-            temperature=0.1,
-            max_tokens=4096
-        )
-
-        if response.choices and response.choices[0].message and response.choices[0].message.content:
-            raw_content = response.choices[0].message.content
-            match = re.search(r'\{.*\}', raw_content, re.DOTALL)
-            if match:
-                try:
-                    return json.loads(match.group(0))
-                except json.JSONDecodeError as e:
-                    logging.error(f"DeepSeek BoE Error: Failed to decode extracted JSON. Error: {e}. Extracted string: {match.group(0)}")
-                    return {"error": "AI returned a malformed JSON object."}
-            else:
-                logging.error(f"DeepSeek BoE Error: No valid JSON object found in response: {raw_content}")
-                return {"error": "AI returned a non-JSON response."}
-
-        return {"error": "AI returned an empty response."}
-    except Exception as e:
-        logging.error(f"DeepSeek BoE Error: {e}", exc_info=True)
-        return {"error": f"An error occurred with the AI service: {e}"}
-
-@app.route("/status")
-def status():
-    return "App is running"
-
-def get_improved_ai_summary(description, update):
+async def get_improved_ai_summary(description, update):
     endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
     key = os.getenv("AZURE_OPENAI_KEY")
     deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT")
@@ -207,6 +140,10 @@ def get_improved_ai_summary(description, update):
     if not all([endpoint, key, deployment_name]) or not update:
         logging.error("Azure OpenAI environment variables missing or no update provided.")
         return "Azure OpenAI not configured or no update provided."
+    
+    assert deployment_name is not None
+    assert endpoint is not None
+    assert key is not None
 
     system_prompt = """
 You are an expert Project Manager at WBI writing an executive summary for a monthly status report. Your task is to take a project description (for context) and a brief update and rewrite it into a professional, concise, and impactful summary.
@@ -224,38 +161,33 @@ Crucially, you must explicitly highlight WBI's contributions and role in the pro
 **Rewritten Update (Highlighting WBI's Contributions):**
 """
 
-    async def call_azure_openai():
-        assert deployment_name is not None
-        
-        try:
-            client = AsyncAzureOpenAI(
-                azure_endpoint=str(endpoint),
-                api_key=str(key),
-                api_version="2024-02-01"
-            )
-
-            response = await client.chat.completions.create(
-                model=deployment_name,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ]
-            )
-
-            if response.choices and response.choices[0].message and response.choices[0].message.content:
-                return response.choices[0].message.content.strip()
-
-            return "AI returned no content."
-
-        except Exception as e:
-            logging.error(f"Azure OpenAI Error: {e}")
-            return f"Error communicating with AI service: {e}"
-
     try:
-        return asyncio.run(call_azure_openai())
+        client = AsyncAzureOpenAI(
+            azure_endpoint=endpoint,
+            api_key=key,
+            api_version="2024-02-01"
+        )
+
+        response = await client.chat.completions.create(
+            model=deployment_name,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+        )
+
+        if response.choices and response.choices[0].message and response.choices[0].message.content:
+            return response.choices[0].message.content.strip()
+
+        return "AI returned no content."
+
     except Exception as e:
-        logging.error(f"Error running AI summary: {e}")
-        return f"Error running AI summary: {e}"
+        logging.error(f"Azure OpenAI Error: {e}")
+        return f"Error communicating with AI service: {e}"
+
+@app.route("/status")
+def status():
+    return "App is running"
 
 @app.route('/api/run-pipeline', methods=['POST'])
 def api_run_pipeline():
@@ -346,7 +278,7 @@ def api_update_project():
     except (ValueError, TypeError):
         return jsonify({"success": False, "error": "Invalid year"}), 400
 
-    ai_summary = get_improved_ai_summary(data.get('description', ''), data['managerUpdate'])
+    ai_summary = get_ai_summary(data.get('description', ''), data['managerUpdate'])
     new_entry = pd.DataFrame([{
         'projectName': data['projectName'],
         'month': data['month'],
@@ -400,35 +332,112 @@ def get_rates():
         return jsonify({"error": "Could not load labor rates."}), 500
 
 @app.route('/api/estimate', methods=['POST'])
-def api_estimate_boe():
-    data = request.json
-    if not data:
-        return jsonify({"error": "Invalid request"}), 400
+async def api_estimate_boe():
+    """
+    Receives proposal data and returns a Basis of Estimate from the DeepSeek model.
+    """
+    if not all([DEEPSEEK_ENDPOINT, DEEPSEEK_KEY]):
+        logging.error("DeepSeek AI credentials not fully set.")
+        return jsonify({"error": "Server configuration error: AI credentials missing."}), 500
 
-    scope = data.get('originalPrompt')
-    personnel = data.get('personnel')
-    if not scope or not personnel:
-        return jsonify({"error": "Missing scope or personnel"}), 400
-
-    case_history = ""
     try:
-        history_path = os.path.join(basedir, 'tools', 'wbi_dataset_final.jsonl')
-        with open(history_path, 'r') as f:
-            first_line = f.readline()
-            if first_line:
-                entry = json.loads(first_line)
-                case_history += entry['contents'][0]['parts'][0]['text'] + "\n"
-                case_history += "RESULT:\n" + entry['contents'][1]['parts'][0]['text'] + "\n---\n"
+        data = await request.get_json()
+        case_history = data.get("case_history", "")
+        new_request = data.get("new_request", "")
+
+        if not new_request:
+            return jsonify({"error": "New request data is missing."}), 400
+
+        system_prompt = "You are an expert government contract proposal manager. Your task is to generate a detailed Basis of Estimate (BOE) in JSON format."
+        user_prompt = f"""
+        Analyze the 'New Request' based on the 'Case History' provided.
+        Generate a comprehensive Basis of Estimate (BOE).
+        The response MUST be a single, valid JSON object and nothing else.
+
+        Your JSON output must follow this exact structure:
+        {{
+          "project_title": "<The title of the new request>",
+          "period_of_performance_months": <integer>,
+          "assumptions": [
+            "<A list of key assumptions made>"
+          ],
+          "work_plan": [
+            {{
+              "task_name": "<Descriptive name of the task>",
+              "personnel": [
+                {{
+                  "role": "<Personnel role>",
+                  "hours": <integer>
+                }}
+              ]
+            }}
+          ],
+          "materials_and_tools": [
+            {{
+              "part_number": "<Part number or identifier>",
+              "description": "<Item description>",
+              "vendor": "<Vendor name>",
+              "quantity": <integer>,
+              "unit_cost": <float>
+            }}
+          ],
+          "travel": [
+            {{
+              "description": "<Purpose of the trip>",
+              "destination": "<City, State>",
+              "duration_days": <integer>,
+              "num_travelers": <integer>,
+              "estimated_cost": <float>
+            }}
+          ],
+          "subcontracts": [
+            {{
+              "subcontractor_name": "<Name of the subcontractor>",
+              "scope_of_work": "<Detailed description of their work>",
+              "estimated_cost": <float>
+            }}
+          ]
+        }}
+
+        --- CASE HISTORY (FOR REFERENCE) ---
+        {case_history}
+
+        --- NEW REQUEST (FOR BOE GENERATION) ---
+        {new_request}
+        """
+
+        assert DEEPSEEK_ENDPOINT is not None
+        assert DEEPSEEK_KEY is not None
+
+        client = ChatCompletionsClient(
+            endpoint=DEEPSEEK_ENDPOINT, 
+            credential=AzureKeyCredential(DEEPSEEK_KEY)
+        )
+        
+        response = await client.complete(
+            deployment_name=DEEPSEEK_DEPLOYMENT,
+            messages=[
+                SystemMessage(content=system_prompt),
+                UserMessage(content=user_prompt)
+            ],
+            temperature=0.1,
+            max_tokens=4096 
+        )
+
+        raw_content = response.choices[0].message.content
+        if not raw_content:
+            raise ValueError("AI returned an empty response.")
+
+        match = re.search(r'\{.*\}', raw_content, re.DOTALL)
+        if match:
+            return jsonify(json.loads(match.group(0))), 200
+        else:
+            logging.error(f"DeepSeek BoE Error: No valid JSON object found in response: {raw_content}")
+            return jsonify({"error": "AI returned a non-JSON response."}), 500
+
     except Exception as e:
-        logging.warning(f"Could not load case history: {e}")
-
-    response_data = get_ai_boe_estimate(scope, personnel, case_history)
-
-    if "error" in response_data:
-        logging.error(f"AI estimation failed with error: {response_data['error']}")
-        return jsonify(response_data), 500
-
-    return jsonify(response_data)
+        logging.error(f"Error in /api/estimate: {e}", exc_info=True)
+        return jsonify({"error": "An internal server error occurred."}), 500
 
 @app.route('/api/generate-boe-excel', methods=['POST'])
 def generate_boe_excel():
@@ -556,7 +565,6 @@ def create_boe_pdf(project_data, totals):
 
     pdf.ln(10) 
 
-    # Table Data
     table_data = [
         ("Direct Labor", f"${totals.get('laborCost', 0):,.2f}"),
         ("Materials & Tools", f"${totals.get('materialsCost', 0):,.2f}"),
@@ -569,7 +577,6 @@ def create_boe_pdf(project_data, totals):
         ("Total Proposed Price", f"${totals.get('totalPrice', 0):,.2f}")
     ]
 
-    # Table Drawing
     line_height = pdf.font_size * 2
     col_width = pdf.epw / 2  
 
@@ -579,17 +586,14 @@ def create_boe_pdf(project_data, totals):
     pdf.set_font("helvetica", "", 11)
 
     for i, (label, value) in enumerate(table_data):
-        # Highlight total rows
         if "Total" in label:
             pdf.set_font("helvetica", "B", 11)
 
         pdf.cell(col_width, line_height, label, border=1)
         pdf.cell(col_width, line_height, value, border=1, ln=True, align='R')
 
-        # Reset font style
         pdf.set_font("helvetica", "", 11)
 
-    # Output to a byte stream
     pdf_stream = io.BytesIO(pdf.output(dest='S'))
     return pdf_stream
 

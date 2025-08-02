@@ -1,148 +1,106 @@
-import time
-import logging
-from bs4 import BeautifulSoup
-import requests
-from urllib.parse import urljoin
+import httpx
+from bs4 import BeautifulSoup, Tag
 from datetime import datetime
+import logging
+import time
 import re
-import sys
+from urllib.parse import urljoin
+import json
 
 logger = logging.getLogger(__name__)
-if not logger.handlers:
-    _handler = logging.StreamHandler()
-    _formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    _handler.setFormatter(_formatter)
-    logger.addHandler(_handler)
-    logger.setLevel(logging.INFO)
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-}
-
 
 def fetch_afwerx_opportunities() -> list:
+    """
+    Fetches AFWERX opportunities using httpx with retry logic for increased stability.
+    """
     base_url = "https://afwerxchallenge.com/current-efforts/"
     results = []
+    max_retries = 3
+    
+    logger.info(f"Fetching AFWERX opportunities from {base_url}")
 
-    try:
-        response = requests.get(base_url, timeout=30)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.content, "html.parser")
+    for attempt in range(max_retries):
+        try:
+            with httpx.Client(follow_redirects=True, timeout=30.0) as client:
+                response = client.get(base_url)
+                response.raise_for_status()
+                
+                soup = BeautifulSoup(response.content, "html.parser")
 
-        cards = soup.select('div.featured-content-card a[href]')
-        for card in cards:
-            href = str(card.get("href")).strip()
-            if not href:
-                continue
-            full_url = urljoin(base_url, href)
+                cards = soup.select('div.featured-content-card a[href]')
+                logger.info(f"Found {len(cards)} potential AFWERX opportunity cards.")
 
-            # Fetch detail page
-            try:
-                detail_resp = requests.get(full_url, timeout=30)
-                detail_resp.raise_for_status()
-                detail_soup = BeautifulSoup(detail_resp.content, "html.parser")
+                for card in cards:
+                    href = card.get("href")
+                    if not href or not isinstance(href, str):
+                        continue
+                    
+                    full_url = urljoin(base_url, href.strip())
 
-                title_el = detail_soup.select_one('h1.title, h1.challenge-title, div.title-holder h1, h1.entry-title')
-                title = title_el.get_text(strip=True) if title_el else "No Title Found"
-
-                desc_el = detail_soup.select_one('div.challenge-description, div.description-content, section.overview-section, div.fr-view, article#main-content')
-                description = desc_el.get_text(separator=" ", strip=True) if desc_el else "No Description Found"
-
-                # Extract dates with regex
-                open_date_str = "N/A"
-                close_date_str = "N/A"
-                text_for_date_extraction = description
-
-                open_date_match = re.search(r"opens on\s+(\d{1,2}/\d{1,2}/\d{4})", text_for_date_extraction, re.IGNORECASE)
-                if open_date_match:
                     try:
-                        open_date_str = datetime.strptime(open_date_match.group(1), "%m/%d/%Y").strftime("%Y-%m-%d")
-                    except ValueError:
-                        open_date_str = open_date_match.group(1)
+                        detail_resp = client.get(full_url)
+                        detail_resp.raise_for_status()
+                        detail_soup = BeautifulSoup(detail_resp.content, "html.parser")
 
-                close_date_match = re.search(r"ends on\s+(\d{1,2}/\d{1,2}/\d{4})", text_for_date_extraction, re.IGNORECASE)
-                if close_date_match:
-                    try:
-                        close_date_str = datetime.strptime(close_date_match.group(1), "%m/%d/%Y").strftime("%Y-%m-%d")
-                    except ValueError:
-                        close_date_str = close_date_match.group(1)
+                        title_el = detail_soup.select_one('h1.title, h1.challenge-title, div.title-holder h1, h1.entry-title')
+                        title = title_el.get_text(strip=True) if title_el else "No Title Found"
 
-                results.append({
-                    "Source": "AFWERX",
-                    "Title": title,
-                    "Description": description[:1000],  
-                    "URL": full_url,
-                    "Open Date": open_date_str,
-                    "Close Date": close_date_str,
-                    "ScrapedDate": datetime.now().isoformat()
-                })
+                        desc_el = detail_soup.select_one('div.challenge-description, div.description-content, section.overview-section, div.fr-view, article#main-content')
+                        description = desc_el.get_text(separator=" ", strip=True) if desc_el else "No Description Found"
 
-            except Exception as detail_err:
-                logging.error(f"Error fetching detail page {full_url}: {detail_err}")
+                        open_date_str, close_date_str = extract_dates_from_text(description)
 
-    except Exception as e:
-        logging.error(f"Error fetching main AFWERX page: {e}")
+                        results.append({
+                            "Source": "AFWERX",
+                            "Title": title,
+                            "Description": description[:1500], 
+                            "URL": full_url,
+                            "Open Date": open_date_str,
+                            "Close Date": close_date_str,
+                            "ScrapedDate": datetime.now().isoformat()
+                        })
+                        logger.info(f"✅ Scraped AFWERX opportunity: {title}")
 
-    logging.info(f"Fetched {len(results)} AFWERX opportunities.")
+                    except httpx.RequestError as detail_err:
+                        logger.error(f"Error fetching detail page {full_url}: {detail_err}")
+                    except Exception as parse_err:
+                        logger.error(f"Error parsing detail page {full_url}: {parse_err}")
+                
+                return results
+
+        except httpx.RequestError as e:
+            logger.error(f"Attempt {attempt + 1} of {max_retries} failed for AFWERX main page: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)  
+            else:
+                logger.error("All retries failed for AFWERX. Returning empty list.")
+                return []
+        except Exception as e:
+            logger.error(f"An unexpected error occurred while fetching AFWERX page: {e}", exc_info=True)
+            return []
+            
     return results
 
-
-def fetch_afwerx_detail(url, listing_title) -> dict | None:
-    try:
-        response = requests.get(url, headers=HEADERS, timeout=20)
-        response.raise_for_status()
-
-        soup = BeautifulSoup(response.text, "html.parser")
-
-        # Extract title
-        title_tag = soup.select_one("h1.title, h1.challenge-title, div.title-holder h1, h1.entry-title")
-        final_title = title_tag.get_text(strip=True) if title_tag else listing_title
-
-        # Extract description
-        desc_tag = soup.select_one("div.challenge-description, div.description-content, section.overview-section, div.fr-view, article#main-content")
-        desc = desc_tag.get_text(separator=" ", strip=True) if desc_tag else "No description available"
-        desc_cleaned = ' '.join(desc.split())[:1000]
-
-        # Extract dates
-        open_date, close_date = extract_dates_from_text(desc)
-
-        return {
-            "Source": "AFWERX",
-            "Title": final_title,
-            "Description": desc_cleaned,
-            "URL": url,
-            "Open Date": open_date,
-            "Close Date": close_date,
-            "ScrapedDate": datetime.now().isoformat()
-        }
-
-    except Exception as e:
-        logger.error(f"Error processing detail page {url}: {e}")
-        return None
-
-
-def extract_dates_from_text(text):
+def extract_dates_from_text(text: str) -> tuple[str, str]:
+    """
+    Extracts open and close dates from a block of text using regex.
+    """
     open_date = "N/A"
     close_date = "N/A"
 
-    open_match = re.search(r"opens on\s+(\d{1,2}/\d{1,2}/\d{4})", text, re.IGNORECASE)
+    open_match = re.search(r"opens on\s+([A-Za-z]+\s+\d{1,2},\s+\d{4}|\d{1,2}/\d{1,2}/\d{4})", text, re.IGNORECASE)
     if open_match:
-        try:
-            open_date = datetime.strptime(open_match.group(1), "%m/%d/%Y").strftime("%Y-%m-%d")
-        except ValueError:
-            open_date = open_match.group(1)
+        open_date = open_match.group(1).strip()
 
-    close_match = re.search(r"ends on\s+(\d{1,2}/\d{1,2}/\d{4})", text, re.IGNORECASE)
+    close_match = re.search(r"(?:closes on|ends on|due by)\s+([A-Za-z]+\s+\d{1,2},\s+\d{4}|\d{1,2}/\d{1,2}/\d{4})", text, re.IGNORECASE)
     if close_match:
-        try:
-            close_date = datetime.strptime(close_match.group(1), "%m/%d/%Y").strftime("%Y-%m-%d")
-        except ValueError:
-            close_date = close_match.group(1)
+        close_date = close_match.group(1).strip()
 
     return open_date, close_date
 
-
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     opportunities = fetch_afwerx_opportunities()
-    print(f"Found {len(opportunities)} AFWERX opportunities.")
+    print(f"\n--- Found {len(opportunities)} AFWERX opportunities ---")
+    for opp in opportunities:
+        print(json.dumps(opp, indent=2))

@@ -1,32 +1,28 @@
-# nasc_solutions_module.py
-
 import logging
-import requests
+import time
 from bs4 import BeautifulSoup, Tag
 from urllib.parse import urljoin
-import time
 from datetime import datetime
 import re
 import json
-from typing import Optional
+from typing import Optional, List, Dict
+import random
+
+# --- Selenium Imports ---
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.common.exceptions import TimeoutException, WebDriverException
+from selenium_stealth import stealth
 
 # --- Logger Setup ---
 logger = logging.getLogger(__name__)
-if not logger.handlers:
-    _handler = logging.StreamHandler()
-    _formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(funcName)s - %(message)s')
-    _handler.setFormatter(_formatter)
-    logger.addHandler(_handler)
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
-    
+
 # --- Module Configuration ---
 NASC_OPPORTUNITIES_URL = "https://nascsolutions.tech/opportunities/"
-REQUEST_DELAY_SECONDS = 1
-
-MODULE_DEFAULT_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 OpportunityScraperModule/1.0"
-}
 
 def _parse_nasc_date(date_str: str) -> str:
     """Parses a date string and returns it in YYYY-MM-DD format."""
@@ -52,21 +48,19 @@ def _parse_nasc_date(date_str: str) -> str:
             
     return dt_obj.strftime("%Y-%m-%d")
 
-
-def _fetch_nasc_detail_page_data(url: str, headers_to_use: dict):
-    """Fetches and parses the detail page for an opportunity."""
-    module_name = "NASC Solutions Detail Fetch"
-    logger.debug(f"[{module_name}] Fetching details from: {url}")
+def _fetch_nasc_detail_page_data(driver: webdriver.Chrome, url: str) -> tuple[str, str, bool, str]:
+    """Fetches and parses the detail page for an opportunity using Selenium."""
     description_text = "Error fetching description."
     due_date_str = "N/A"
     is_closed_or_awarded_flag = False
     status_comment_str = "Status Unknown"
 
     try:
-        time.sleep(REQUEST_DELAY_SECONDS)
-        response = requests.get(url, headers=headers_to_use, timeout=25)
-        response.raise_for_status()
-        detail_soup = BeautifulSoup(response.content, "html.parser")
+        driver.get(url)
+        WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "div.et_pb_post_content"))
+        )
+        detail_soup = BeautifulSoup(driver.page_source, "html.parser")
         
         main_desc_column = detail_soup.select_one("div.et_pb_column_3_5 div.et_pb_post_content")
         if main_desc_column and isinstance(main_desc_column, Tag):
@@ -89,41 +83,52 @@ def _fetch_nasc_detail_page_data(url: str, headers_to_use: dict):
                                 is_closed_or_awarded_flag = True
                                 status_comment_str = f"Status: {line}"
                                 break
-
-    except requests.exceptions.RequestException as e:
-        logger.error(f"[{module_name}] Error fetching detail page {url}: {e}")
-        status_comment_str = "Detail page fetch error"
     except Exception as e_detail:
-        logger.error(f"[{module_name}] Error parsing detail page {url}: {e_detail}", exc_info=False)
+        logger.error(f"[NASC Detail] Error parsing detail page {url}: {e_detail}", exc_info=False)
         status_comment_str = "Detail page parse error"
         
     return description_text, due_date_str, is_closed_or_awarded_flag, status_comment_str
 
-def fetch_nasc_opportunities(headers_to_use: Optional[dict] = None, max_cards_to_process: Optional[int] = None) -> list:
+def fetch_nasc_opportunities(max_cards_to_process: Optional[int] = None) -> list:
     """
-    Fetches all 'Current' opportunities from NASC Solutions.
+    Fetches all 'Current' opportunities from NASC Solutions using Selenium.
     """
     module_name = "NASC Solutions" 
     logger.info(f"[{module_name}] 🧪 Starting scraper for: {NASC_OPPORTUNITIES_URL}")
     
-    current_headers = headers_to_use if headers_to_use else MODULE_DEFAULT_HEADERS
     results = []
-    processed_eligible_cards_count = 0
+    driver = None
     
     try:
-        response = requests.get(NASC_OPPORTUNITIES_URL, headers=current_headers, timeout=30)
-        response.raise_for_status()
-        logger.info(f"[{module_name}] Successfully fetched the main opportunities page.")
-        soup = BeautifulSoup(response.content, "html.parser")
+        options = webdriver.ChromeOptions()
+        options.add_argument("--headless")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("start-maximized")
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option('useAutomationExtension', False)
+        
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
+        
+        stealth(driver, languages=["en-US", "en"], vendor="Google Inc.", platform="Win32", webgl_vendor="Intel Inc.", renderer="Intel Iris OpenGL Engine", fix_hairline=True)
+
+        driver.get(NASC_OPPORTUNITIES_URL)
+        WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "div.et_pb_portfolio_items"))
+        )
+        
+        soup = BeautifulSoup(driver.page_source, "html.parser")
         portfolio_items_container = soup.select_one("div.et_pb_portfolio_items")
         
         if not portfolio_items_container or not isinstance(portfolio_items_container, Tag):
-            logger.warning(f"[{module_name}] Could not find opportunities container 'div.et_pb_portfolio_items'.")
+            logger.warning(f"[{module_name}] Could not find opportunities container.")
             return results
 
         opportunity_cards = portfolio_items_container.find_all("div", class_="et_pb_portfolio_item")
-        logger.info(f"[{module_name}] Found {len(opportunity_cards)} potential opportunity cards on listing page.")
+        logger.info(f"[{module_name}] Found {len(opportunity_cards)} potential opportunity cards.")
 
+        processed_eligible_cards_count = 0
         for idx, card in enumerate(opportunity_cards):
             if not isinstance(card, Tag): continue
 
@@ -134,7 +139,7 @@ def fetch_nasc_opportunities(headers_to_use: Optional[dict] = None, max_cards_to
                 continue
 
             if max_cards_to_process is not None and processed_eligible_cards_count >= max_cards_to_process:
-                logger.info(f"[{module_name}] Reached max_cards_to_process limit ({max_cards_to_process}) for 'Current' items. Stopping.")
+                logger.info(f"[{module_name}] Reached max_cards_to_process limit ({max_cards_to_process}).")
                 break
             
             title, url = "N/A", "N/A"
@@ -152,8 +157,7 @@ def fetch_nasc_opportunities(headers_to_use: Optional[dict] = None, max_cards_to
             logger.info(f"[{module_name}] Processing 'Current' card {idx + 1}: '{title}'")
             processed_eligible_cards_count += 1
 
-            detailed_description, close_date, is_closed_or_awarded, status_comment = \
-                _fetch_nasc_detail_page_data(url, current_headers)
+            detailed_description, close_date, is_closed_or_awarded, status_comment = _fetch_nasc_detail_page_data(driver, url)
             
             if is_closed_or_awarded:
                 logger.info(f"[{module_name}] Skipping '{title}' due to status: {status_comment}")
@@ -173,27 +177,29 @@ def fetch_nasc_opportunities(headers_to_use: Optional[dict] = None, max_cards_to
                 "ScrapedDate": datetime.now().isoformat(),
                 "Close Date": close_date,
             })
+            time.sleep(random.uniform(1.0, 2.5))
 
-    except requests.exceptions.RequestException as e_req:
-        logger.error(f"[{module_name}] Request error: {e_req}")
+    except TimeoutException:
+        logger.error("[NASC] Timed out waiting for page content. Site may be down or blocking automation.")
+    except WebDriverException as e:
+        logger.error(f"[NASC] WebDriver error: {e}")
     except Exception as e:
         logger.error(f"[{module_name}] Unexpected error: {e}", exc_info=True)
+    finally:
+        if driver:
+            driver.quit()
 
-    logger.info(f"[{module_name}] Scraper finished. Found {len(results)} total 'Current' opportunities to be analyzed.")
+    logger.info(f"[{module_name}] Scraper finished. Found {len(results)} 'Current' opportunities.")
     return results
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(funcName)s - %(message)s', force=True)
-    
     logger.info("🚀 Running nasc_solutions_module.py standalone for testing...")
     
-    scraped_data = fetch_nasc_opportunities(
-        headers_to_use=MODULE_DEFAULT_HEADERS, 
-        max_cards_to_process=10
-    )
+    scraped_data = fetch_nasc_opportunities(max_cards_to_process=10)
     
     if scraped_data:
-        logger.info(f"\n--- {len(scraped_data)} NASC Opportunities Found (Standalone Test) ---")
+        logger.info(f"\n--- {len(scraped_data)} NASC Opportunities Found ---")
         print(json.dumps(scraped_data, indent=2))
     else:
         logger.info("No 'Current' NASC opportunities found.")
