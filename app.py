@@ -10,7 +10,7 @@ import threading
 import uuid
 import re
 from xlsxwriter.workbook import Workbook
-from typing import cast
+from typing import cast, Optional, Dict
 from fpdf import FPDF
 
 from tools import org_chart_parser
@@ -19,13 +19,15 @@ from tools import wbiops
 from azure.storage.blob import BlobServiceClient
 from openai import AsyncAzureOpenAI
 
-from azure.ai.inference.aio import ChatCompletionsClient
-from azure.ai.inference.models import SystemMessage, UserMessage
-from azure.core.credentials import AzureKeyCredential
+# --- Configuration for AI Models ---
+AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
+AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY")
+AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT")
 
 DEEPSEEK_ENDPOINT = os.getenv("DEEPSEEK_AZURE_ENDPOINT")
 DEEPSEEK_KEY = os.getenv("DEEPSEEK_AZURE_KEY")
 DEEPSEEK_DEPLOYMENT = "WBI-Dash-DeepSeek"
+
 
 print("Flask App Loaded. ENV:", os.environ.get("AZURE_STORAGE_CONNECTION_STRING"))
 
@@ -45,6 +47,10 @@ if not logging.getLogger().hasHandlers():
     logging.basicConfig(level=logging.INFO)
 
 pipeline_jobs = {}
+
+# ==============================================================================
+# --- CORE APPLICATION LOGIC & HELPER FUNCTIONS ---
+# ==============================================================================
 
 def run_pipeline_logic(job_id):
     """
@@ -184,6 +190,22 @@ Crucially, you must explicitly highlight WBI's contributions and role in the pro
     except Exception as e:
         logging.error(f"Azure OpenAI Error: {e}")
         return f"Error communicating with AI service: {e}"
+
+def _extract_json_from_response(text: str) -> Optional[Dict]:
+    """Robustly extracts a JSON object from a string, even with surrounding text."""
+    match = re.search(r'\{.*\}', text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            logging.error(f"Failed to decode extracted JSON: {match.group(0)}")
+            return None
+    logging.error(f"No valid JSON object found in response: {text}")
+    return None
+
+# ==============================================================================
+# --- FLASK API ROUTES ---
+# ==============================================================================
 
 @app.route("/status")
 def status():
@@ -340,13 +362,20 @@ async def api_estimate_boe():
         logging.error("DeepSeek AI credentials not fully set.")
         return jsonify({"error": "Server configuration error: AI credentials missing."}), 500
 
-    try:
-        data = await request.get_json()
-        case_history = data.get("case_history", "")
-        new_request = data.get("new_request", "")
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "Invalid request: No JSON body received."}), 400
 
-        if not new_request:
-            return jsonify({"error": "New request data is missing."}), 400
+    case_history = data.get("case_history", "")
+    new_request = data.get("new_request", "")
+    if not new_request:
+        return jsonify({"error": "New request data is missing."}), 400
+
+    client = None
+    try:
+        assert DEEPSEEK_ENDPOINT is not None
+        assert DEEPSEEK_KEY is not None
+        client = AsyncAzureOpenAI(azure_endpoint=DEEPSEEK_ENDPOINT, api_key=DEEPSEEK_KEY, api_version="2024-02-01")
 
         system_prompt = "You are an expert government contract proposal manager. Your task is to generate a detailed Basis of Estimate (BOE) in JSON format."
         user_prompt = f"""
@@ -405,39 +434,32 @@ async def api_estimate_boe():
         --- NEW REQUEST (FOR BOE GENERATION) ---
         {new_request}
         """
-
-        assert DEEPSEEK_ENDPOINT is not None
-        assert DEEPSEEK_KEY is not None
-
-        client = ChatCompletionsClient(
-            endpoint=DEEPSEEK_ENDPOINT, 
-            credential=AzureKeyCredential(DEEPSEEK_KEY)
-        )
         
-        response = await client.complete(
-            deployment_name=DEEPSEEK_DEPLOYMENT,
+        assert DEEPSEEK_DEPLOYMENT is not None
+        response = await client.chat.completions.create(
+            model=DEEPSEEK_DEPLOYMENT,
             messages=[
-                SystemMessage(content=system_prompt),
-                UserMessage(content=user_prompt)
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
             ],
             temperature=0.1,
-            max_tokens=4096 
+            max_tokens=4096,
+            response_format={"type": "json_object"}
         )
-
+        
         raw_content = response.choices[0].message.content
         if not raw_content:
             raise ValueError("AI returned an empty response.")
 
-        match = re.search(r'\{.*\}', raw_content, re.DOTALL)
-        if match:
-            return jsonify(json.loads(match.group(0))), 200
-        else:
-            logging.error(f"DeepSeek BoE Error: No valid JSON object found in response: {raw_content}")
-            return jsonify({"error": "AI returned a non-JSON response."}), 500
+        final_json = json.loads(raw_content)
+        return jsonify(final_json), 200
 
     except Exception as e:
         logging.error(f"Error in /api/estimate: {e}", exc_info=True)
-        return jsonify({"error": "An internal server error occurred."}), 500
+        return jsonify({"error": "An internal server error occurred during AI processing."}), 500
+    finally:
+        if client:
+            await client.close()
 
 @app.route('/api/generate-boe-excel', methods=['POST'])
 def generate_boe_excel():
@@ -547,12 +569,10 @@ def create_boe_pdf(project_data, totals):
     pdf = FPDF()
     pdf.add_page()
 
-    # Header
     pdf.set_font("helvetica", "B", 20)
     pdf.cell(0, 10, "Basis of Estimate", ln=True, align="R")
     pdf.set_font("helvetica", "", 11)
 
-    # Project Info
     pdf.set_font("helvetica", "B", 11)
     pdf.cell(25, 8, "Project:", border=0)
     pdf.set_font("helvetica", "", 11)

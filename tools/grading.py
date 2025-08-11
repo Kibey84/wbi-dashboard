@@ -6,6 +6,7 @@ import asyncio
 import json
 import re
 from datetime import datetime
+from typing import List, Dict, Optional
 
 # Document and file handling imports
 from docx import Document
@@ -27,7 +28,6 @@ OUTPUT_FILENAME = "sbir_top_30_ranked.docx"
 COMPANY_DATA_SOURCE_FILE = "Discovered Companies.xlsx"
 LOG_FILENAME = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sbir_grading_log.txt")
 
-
 MAX_RANKING_LIMIT = 30
 GRADING_WEIGHTS = {
     'Technology_Strength': 0.30,
@@ -37,12 +37,8 @@ GRADING_WEIGHTS = {
 }
 
 # ====== AI GRADING FUNCTION ======
-async def get_ai_grading(dossier_text, client: AsyncAzureOpenAI):
-    """Asynchronously grades a company dossier using the standard openai client."""
-    
-    if not all([AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_KEY, AZURE_OPENAI_DEPLOYMENT]):
-        logging.error("Azure OpenAI credentials not fully set.")
-        return {"error": "Azure OpenAI credentials not set."}
+async def get_ai_grading(client: AsyncAzureOpenAI, dossier_text: str) -> Dict:
+    """Asynchronously grades a company dossier and robustly parses the JSON response."""
     
     assert AZURE_OPENAI_DEPLOYMENT is not None
 
@@ -69,23 +65,31 @@ async def get_ai_grading(dossier_text, client: AsyncAzureOpenAI):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.0,
-            max_tokens=1500,
-            response_format={"type": "json_object"} 
+            temperature=0.1,
+            max_tokens=2000
         )
         
-        ai_message = response.choices[0].message.content
-        if ai_message:
-            return json.loads(ai_message)
+        raw_content = response.choices[0].message.content
+        if not raw_content:
+            raise ValueError("AI returned an empty response.")
+
+        match = re.search(r'\{.*\}', raw_content, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except json.JSONDecodeError as e:
+                logging.error(f"Failed to decode extracted JSON: {e}. Content: {match.group(0)}")
+                return {"error": "AI returned a malformed JSON object."}
         else:
-            raise ValueError("AI response was empty.")
+            logging.error(f"No valid JSON object found in AI response: {raw_content}")
+            return {"error": "AI returned a non-JSON response."}
             
     except Exception as e:
         logging.error(f"AI grading failed: {e}", exc_info=True)
         return {"error": str(e)}
 
 # ====== HELPER FUNCTIONS ======
-def load_company_urls(source_file):
+def load_company_urls(source_file: str) -> Dict[str, str]:
     try:
         if not os.path.exists(source_file):
             logging.warning(f"Company data source file not found at: {source_file}")
@@ -100,7 +104,7 @@ def load_company_urls(source_file):
         logging.error(f"Error loading company URLs: {e}")
         return {}
 
-def add_hyperlink(paragraph, url, text):
+def add_hyperlink(paragraph, url: str, text: str):
     part = paragraph.part
     r_id = part.relate_to(url, RELATIONSHIP_TYPE.HYPERLINK, is_external=True)
     hyperlink = OxmlElement('w:hyperlink')
@@ -115,7 +119,7 @@ def add_hyperlink(paragraph, url, text):
     paragraph._p.append(hyperlink)
     return hyperlink
 
-def save_graded_report(df, filename):
+def save_graded_report(df: pd.DataFrame, filename: str):
     if df.empty:
         logging.warning("No graded data to save.")
         return
@@ -125,8 +129,9 @@ def save_graded_report(df, filename):
     p_date = doc.add_paragraph(f"Report generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     p_date.alignment = WD_ALIGN_PARAGRAPH.CENTER
     doc.add_page_break()
-    for idx, row in df_sorted.iterrows():
-        doc.add_heading(f"Rank #{df_sorted.index.get_loc(idx) + 1}: {row['Company']}", level=1)
+    
+    for rank, (idx, row) in enumerate(df_sorted.iterrows(), 1):
+        doc.add_heading(f"Rank #{rank}: {row['Company']}", level=1)
         url = row.get('Company_URL', '')
         if isinstance(url, str) and url.startswith('http'):
             p_url = doc.add_paragraph()
@@ -147,12 +152,12 @@ def save_graded_report(df, filename):
     doc.save(filename)
     logging.info(f"Saved graded report to {filename}")
 
-def safe_get_score(score_dict):
+def safe_get_score(score_dict: Optional[Dict]) -> float:
     if isinstance(score_dict, dict) and 'score' in score_dict:
-        return score_dict['score']
+        return float(score_dict['score'])
     return 0.0
 
-def safe_get_justification(score_dict):
+def safe_get_justification(score_dict: Optional[Dict]) -> str:
     if isinstance(score_dict, dict) and 'justification' in score_dict:
         return score_dict['justification']
     return 'N/A'
@@ -175,13 +180,14 @@ async def run_grading_process():
 
     assert AZURE_OPENAI_ENDPOINT is not None
     assert AZURE_OPENAI_KEY is not None
-
     client = AsyncAzureOpenAI(
         azure_endpoint=AZURE_OPENAI_ENDPOINT,
         api_key=AZURE_OPENAI_KEY,
         api_version="2024-02-01"
     )
 
+    tasks = []
+    company_data_map = {}
     for file_path in dossier_files:
         try:
             doc = Document(file_path)
@@ -190,47 +196,53 @@ async def run_grading_process():
             company_name = doc.paragraphs[0].text.replace("Dossier:", "").strip()
             full_text = "\n".join(p.text for p in doc.paragraphs)
             
-            grading_result_dict = await get_ai_grading(full_text, client)
-            
-            if not isinstance(grading_result_dict, dict) or 'error' in grading_result_dict:
-                logging.error(f"Failed grading for {company_name}: {grading_result_dict.get('error')}")
-                continue
-
-            tech_score = safe_get_score(grading_result_dict.get('Technology_Strength'))
-            market_score = safe_get_score(grading_result_dict.get('Market_Traction'))
-            team_score = safe_get_score(grading_result_dict.get('Team_Experience'))
-            dod_score = safe_get_score(grading_result_dict.get('DoD_Alignment'))
-
-            smart_bet = (
-                (tech_score * GRADING_WEIGHTS['Technology_Strength']) +
-                (market_score * GRADING_WEIGHTS['Market_Traction']) +
-                (team_score * GRADING_WEIGHTS['Team_Experience']) +
-                (dod_score * GRADING_WEIGHTS['DoD_Alignment'])
-            )
-            
-            all_graded_results.append({
-                'Company': company_name,
-                'Company_URL': company_urls.get(company_name, 'N/A'),
-                'Smart_Bet_Score': round(smart_bet, 2),
-                'Technology_Strength_Score': tech_score,
-                'Technology_Strength_Justification': safe_get_justification(grading_result_dict.get('Technology_Strength')),
-                'Market_Traction_Score': market_score,
-                'Market_Traction_Justification': safe_get_justification(grading_result_dict.get('Market_Traction')),
-                'Team_Experience_Score': team_score,
-                'Team_Experience_Justification': safe_get_justification(grading_result_dict.get('Team_Experience')),
-                'DoD_Alignment_Score': dod_score,
-                'DoD_Alignment_Justification': safe_get_justification(grading_result_dict.get('DoD_Alignment'))
-            })
-            logging.info(f"Graded {company_name} with score {smart_bet:.2f}")
-            await asyncio.sleep(2) 
+            tasks.append(get_ai_grading(client, full_text))
+            company_data_map[company_name] = {'url': company_urls.get(company_name, 'N/A')}
         except Exception as e:
-            logging.error(f"Failed processing dossier {file_path}: {e}", exc_info=True)
-            
+            logging.error(f"Error reading dossier {file_path}: {e}")
+    
+    ai_grades = await asyncio.gather(*tasks)
+
+    for (company_name, data), grade in zip(company_data_map.items(), ai_grades):
+        if not isinstance(grade, dict) or 'error' in grade:
+            logging.error(f"Failed grading for {company_name}: {grade.get('error')}")
+            continue
+
+        tech_score = safe_get_score(grade.get('Technology_Strength'))
+        market_score = safe_get_score(grade.get('Market_Traction'))
+        team_score = safe_get_score(grade.get('Team_Experience'))
+        dod_score = safe_get_score(grade.get('DoD_Alignment'))
+
+        smart_bet = (
+            (tech_score * GRADING_WEIGHTS['Technology_Strength']) +
+            (market_score * GRADING_WEIGHTS['Market_Traction']) +
+            (team_score * GRADING_WEIGHTS['Team_Experience']) +
+            (dod_score * GRADING_WEIGHTS['DoD_Alignment'])
+        )
+        
+        all_graded_results.append({
+            'Company': company_name,
+            'Company_URL': data['url'],
+            'Smart_Bet_Score': round(smart_bet, 2),
+            'Technology_Strength_Score': tech_score,
+            'Technology_Strength_Justification': safe_get_justification(grade.get('Technology_Strength')),
+            'Market_Traction_Score': market_score,
+            'Market_Traction_Justification': safe_get_justification(grade.get('Market_Traction')),
+            'Team_Experience_Score': team_score,
+            'Team_Experience_Justification': safe_get_justification(grade.get('Team_Experience')),
+            'DoD_Alignment_Score': dod_score,
+            'DoD_Alignment_Justification': safe_get_justification(grade.get('DoD_Alignment'))
+        })
+        logging.info(f"Graded {company_name} with score {smart_bet:.2f}")
+
     if all_graded_results:
         df = pd.DataFrame(all_graded_results)
         save_graded_report(df, OUTPUT_FILENAME)
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s',
-                        handlers=[logging.FileHandler(LOG_FILENAME), logging.StreamHandler()])
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        handlers=[logging.FileHandler(LOG_FILENAME, mode='w'), logging.StreamHandler()]
+    )
     asyncio.run(run_grading_process())

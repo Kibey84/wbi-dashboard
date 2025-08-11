@@ -37,7 +37,7 @@ from .osti_foa_module import fetch_osti_foas
 from .arpae_scraper import fetch_arpae_opportunities
 from .iarpa_scraper import fetch_iarpa_opportunities
 from .sbir_pipeline_scraper import fetch_sbir_partnership_opportunities
-from .sam_gov_api_module import fetch_sam_gov_opportunities
+from .sam_gov_module import fetch_sam_gov_opportunities
 
 TESTING_MODE = False
 

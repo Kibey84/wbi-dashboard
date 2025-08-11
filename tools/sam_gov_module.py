@@ -40,7 +40,6 @@ def _make_sam_api_request_with_retries(url, params, headers, logger_instance):
 def fetch_sam_gov_opportunities() -> list:
     module_logger.info("🔍 Scraping SAM.gov v2 via API (with pagination)...")
 
-    # Pull key from Azure env
     api_key = os.getenv("SAM_GOV_API_KEY")
     module_logger.info(f"SAM.gov API key loaded? {'YES' if api_key else 'NO'}")
     if not api_key or api_key.strip() == "":

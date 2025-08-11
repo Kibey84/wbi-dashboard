@@ -4,37 +4,21 @@ import fitz  # PyMuPDF
 import json
 import re
 import asyncio
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 
 from openai import AsyncAzureOpenAI
 from openpyxl import Workbook
-from openpyxl.worksheet.worksheet import Worksheet 
+from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl.styles import PatternFill, Font, Alignment
-from openpyxl.utils.dataframe import dataframe_to_rows
 from openpyxl.utils import get_column_letter
 
 # === Azure OpenAI Call ===
-async def call_azure_ai(prompt_text: str) -> Optional[str]:
-    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-    key = os.getenv("AZURE_OPENAI_KEY")
+async def call_azure_ai(client: AsyncAzureOpenAI, prompt_text: str) -> Optional[str]:
+    """Asynchronously calls the Azure AI model using a shared client."""
     deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT")
-
-    if not all([endpoint, key, deployment_name]):
-        print("[Config Error] Azure OpenAI credentials not configured.")
-        return None
-
-    assert endpoint is not None
-    assert key is not None
     assert deployment_name is not None
 
     try:
-        client = AsyncAzureOpenAI(
-            azure_endpoint=endpoint,
-            api_key=key,
-            api_version="2024-02-01",
-            timeout=90.0
-        )
-
         response = await client.chat.completions.create(
             model=deployment_name,
             messages=[
@@ -55,7 +39,8 @@ async def call_azure_ai(prompt_text: str) -> Optional[str]:
         return None
 
 # === Org Chart Parsing Logic ===
-def parse_text_chunk(text_chunk: str) -> List[dict]:
+async def parse_text_chunk(client: AsyncAzureOpenAI, text_chunk: str) -> List[dict]:
+    """Asynchronously parses a chunk of text using the AI model."""
     prompt = f"""
     You are an expert data entry assistant. From the text below, extract a list of all distinct organizational units.
     
@@ -63,14 +48,14 @@ def parse_text_chunk(text_chunk: str) -> List[dict]:
     - Create a JSON list where each object has the keys "name", "leader", "title", and "location".
     - If a piece of information is missing for a unit, use an empty string "".
     - Focus only on the text provided. Do not invent or infer information.
-    - Provide ONLY the JSON list as your response, starting with [ and ending with ].
+    - Provide ONLY the JSON list as your response.
 
     ---
     TEXT TO PARSE:
     {text_chunk}
     """
     try:
-        ai_response_text = asyncio.run(call_azure_ai(prompt))
+        ai_response_text = await call_azure_ai(client, prompt)
 
         if not ai_response_text:
             print("[AI Error] No response received for chunk.")
@@ -87,9 +72,7 @@ def parse_text_chunk(text_chunk: str) -> List[dict]:
 
 # === Excel Output ===
 def save_and_format_excel(df: pd.DataFrame, output_directory: str, output_filename: str) -> None:
-    """
-    Saves the DataFrame to a beautifully formatted Excel file, grouped by location.
-    """
+    """Saves the DataFrame to a formatted Excel file, grouped by location."""
     if df.empty:
         print("[Excel Output] DataFrame is empty. Skipping save.")
         return
@@ -130,7 +113,7 @@ def save_and_format_excel(df: pd.DataFrame, output_directory: str, output_filena
             cell.font = location_font
             cell.fill = location_fill
             cell.alignment = Alignment(horizontal='center', vertical='center')
-            row_color_index = 0 
+            row_color_index = 0
 
         data_row = [row.get(col, '') for col in ["Unit", "Leader", "Title", "Location"]]
         ws.append(data_row)
@@ -154,26 +137,52 @@ def save_and_format_excel(df: pd.DataFrame, output_directory: str, output_filena
     wb.save(full_path)
     print(f"[Excel Output] Saved formatted file at {full_path}")
 
+# === PDF Processing ===
+async def _async_process_pdf(pdf_bytes: bytes) -> List[dict]:
+    """The core async logic for processing the PDF."""
+    all_units = []
+    
+    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+    key = os.getenv("AZURE_OPENAI_KEY")
+    if not endpoint or not key:
+        print("[Config Error] Azure OpenAI credentials not found for async processing.")
+        return []
+
+    client = AsyncAzureOpenAI(
+        azure_endpoint=endpoint,
+        api_key=key,
+        api_version="2024-02-01",
+        timeout=90.0
+    )
+
+    with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+        print(f"[PDF Processing] Starting to process {len(doc)} pages.")
+        
+        tasks = []
+        for i, page in enumerate(doc): #type:ignore
+            page_text = page.get_text("text")
+            if page_text.strip():
+                tasks.append(parse_text_chunk(client, page_text))
+            else:
+                print(f"[PDF Processing] Page {i+1} has no text.")
+        
+        page_results = await asyncio.gather(*tasks)
+        
+        for result_list in page_results:
+            all_units.extend(result_list)
+            
+    return all_units
+
 def process_uploaded_pdf(uploaded_file, output_directory: str) -> Optional[str]:
+    """Synchronous wrapper that runs the entire async PDF processing workflow."""
     try:
         if not hasattr(uploaded_file, 'filename') or not uploaded_file.filename:
             print("[File Error] Uploaded file has no filename.")
             return None
             
-        all_units = []
         pdf_bytes = uploaded_file.read()
         
-        with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
-            print(f"[PDF Processing] Starting to process {len(doc)} pages.")
-            for i, page in enumerate(doc): # type: ignore
-                print(f"[PDF Processing] Analyzing page {i+1}...")
-                page_text = page.get_text("text")
-                if page_text.strip():
-                    units_from_page = parse_text_chunk(page_text)
-                    if units_from_page:
-                        all_units.extend(units_from_page)
-                else:
-                    print(f"[PDF Processing] Page {i+1} has no text.")
+        all_units = asyncio.run(_async_process_pdf(pdf_bytes))
         
         if not all_units:
             print("[PDF Processing] AI returned no data from any page.")

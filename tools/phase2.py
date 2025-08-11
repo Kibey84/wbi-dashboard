@@ -8,19 +8,23 @@ import json
 import re
 from docx import Document
 from openai import AsyncAzureOpenAI
+from typing import List, Dict, Optional
 
+# --- Configuration ---
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
 AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY")
 AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT")
 
-if not (AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_KEY and AZURE_OPENAI_DEPLOYMENT):
-    raise EnvironmentError("Azure OpenAI ENV variables (ENDPOINT, KEY, DEPLOYMENT) are missing.")
-
 INPUT_FILENAME = "Discovered Companies.xlsx"
 OUTPUT_FOLDER = "company_dossiers"
 LOG_FILENAME = "sbir_research_log.txt"
+
+# Ensure the output directory exists
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
-def clean_ai_response(text):
+
+# --- Helper Functions ---
+def clean_ai_response(text: str) -> str:
+    """Removes common conversational filler from the AI's response."""
     patterns_to_remove = [
         r"^\s*Okay,.*?dossier\s*\n", r"^\s*Here is the dossier:?\s*\n",
         r"^\s*Okay, initiating.*?Complete\.\.\.\s*\n", r"^\s*Okay, here's.*?dossier\s*\n",
@@ -32,7 +36,51 @@ def clean_ai_response(text):
         cleaned_text = re.sub(pattern, '', cleaned_text, flags=re.IGNORECASE | re.DOTALL)
     return cleaned_text.strip()
 
-async def get_ai_research_summary(company_name):
+def create_company_dossier(company_name: str, award_data: pd.Series, ai_summary: str):
+    """Creates and saves a .docx dossier for a single company."""
+    doc = Document()
+    doc.add_heading(f'Dossier: {company_name}', level=1)
+    doc.add_heading('SBIR Award Details', level=2)
+    
+    p = doc.add_paragraph()
+    p.add_run('Award Title: ').bold = True
+    p.add_run(str(award_data.get('award_title', 'N/A')))
+    
+    p = doc.add_paragraph()
+    p.add_run('Amount: ').bold = True
+    p.add_run(f"${float(award_data.get('award_amount', 0)):,.2f}")
+    
+    p = doc.add_paragraph()
+    p.add_run('Award Date: ').bold = True
+    award_date = award_data.get('proposal_award_date', 'N/A')
+    if isinstance(award_date, datetime):
+        p.add_run(award_date.strftime('%Y-%m-%d'))
+    else:
+        p.add_run(str(award_date))
+        
+    p = doc.add_paragraph()
+    p.add_run('Branch: ').bold = True
+    p.add_run(str(award_data.get('branch', 'N/A')))
+    
+    doc.add_heading('AI-Generated Intelligence Summary', level=2)
+    for line in ai_summary.split('\n'):
+        line = line.strip()
+        if line.startswith('**'):
+            p = doc.add_paragraph()
+            p.add_run(line.replace('**', '').strip()).bold = True
+        elif line.startswith('*'):
+            doc.add_paragraph(line.lstrip('* ').strip(), style='List Bullet')
+        elif line:
+            doc.add_paragraph(line)
+            
+    safe_filename = "".join(c for c in company_name if c.isalnum() or c == ' ').rstrip()
+    filepath = os.path.join(OUTPUT_FOLDER, f"{safe_filename}.docx")
+    doc.save(filepath)
+    logging.info(f"Saved dossier for {company_name} at {filepath}")
+
+# --- Asynchronous AI and Orchestration ---
+async def get_ai_research_summary(client: AsyncAzureOpenAI, company_name: str) -> str:
+    """Generates an AI summary for a single company using a shared client."""
     prompt = f"""
     Act as a senior venture capital analyst specializing in defense and aerospace. Research the US-based company '{company_name}'.
 
@@ -44,13 +92,9 @@ async def get_ai_research_summary(company_name):
     **Sources:** Top 3-5 URLs.
     """
     try:
-        client = AsyncAzureOpenAI(
-            azure_endpoint=str(AZURE_OPENAI_ENDPOINT),
-            api_key=str(AZURE_OPENAI_KEY),
-            api_version="2024-02-01"
-        )
+        assert AZURE_OPENAI_DEPLOYMENT is not None
         result = await client.chat.completions.create(
-            model=str(AZURE_OPENAI_DEPLOYMENT),
+            model=AZURE_OPENAI_DEPLOYMENT,
             messages=[
                 {"role": "system", "content": "You are a venture analyst assistant."},
                 {"role": "user", "content": prompt}
@@ -66,64 +110,54 @@ async def get_ai_research_summary(company_name):
         logging.error(f"Azure OpenAI API Error for {company_name}: {e}")
         return "AI summary failed due to API error."
 
-def create_company_dossier(company_name, award_data, ai_summary):
-    doc = Document()
-    doc.add_heading(f'Dossier: {company_name}', level=1)
-    doc.add_heading('SBIR Award Details', level=2)
-    p = doc.add_paragraph()
-    p.add_run('Award Title: ').bold = True
-    p.add_run(str(award_data.get('award_title', 'N/A')))
-    p = doc.add_paragraph()
-    p.add_run('Amount: ').bold = True
-    p.add_run(f"${float(award_data.get('award_amount', 0)):,.2f}")
-    p = doc.add_paragraph()
-    p.add_run('Award Date: ').bold = True
-    award_date = award_data.get('proposal_award_date', 'N/A')
-    if isinstance(award_date, datetime):
-        p.add_run(award_date.strftime('%Y-%m-%d'))
-    else:
-        p.add_run(str(award_date))
-    p = doc.add_paragraph()
-    p.add_run('Branch: ').bold = True
-    p.add_run(str(award_data.get('branch', 'N/A')))
-    doc.add_heading('AI-Generated Intelligence Summary', level=2)
-    for line in ai_summary.split('\n'):
-        line = line.strip()
-        if line.startswith('**'):
-            p = doc.add_paragraph()
-            p.add_run(line.replace('**', '').strip()).bold = True
-        elif line.startswith('*'):
-            doc.add_paragraph(line.lstrip('* ').strip(), style='List Bullet')
-        elif line:
-            doc.add_paragraph(line)
-    os.makedirs(OUTPUT_FOLDER, exist_ok=True)
-    safe_filename = "".join(c for c in company_name if c.isalnum() or c == ' ').rstrip()
-    filepath = os.path.join(OUTPUT_FOLDER, f"{safe_filename}.docx")
-    doc.save(filepath)
-    logging.info(f"Saved dossier for {company_name} at {filepath}")
-
-async def run_research_and_generate_dossiers(input_file):
+async def run_research_and_generate_dossiers(input_file: str):
+    """
+    Main async function to read companies, run AI research in parallel, and save dossiers.
+    """
     logging.info(f"Starting AI research from {input_file}")
     try:
         df = pd.read_excel(input_file)
     except FileNotFoundError:
         logging.error(f"File not found: {input_file}")
         return
-    companies = df.drop_duplicates(subset='firm')
+
+    companies = df.drop_duplicates(subset='firm').to_dict('records')
     logging.info(f"Found {len(companies)} unique companies to process.")
-    for _, row in companies.iterrows():
+
+    assert AZURE_OPENAI_ENDPOINT is not None
+    assert AZURE_OPENAI_KEY is not None
+    client = AsyncAzureOpenAI(
+        azure_endpoint=AZURE_OPENAI_ENDPOINT,
+        api_key=AZURE_OPENAI_KEY,
+        api_version="2024-02-01"
+    )
+
+    tasks = []
+    company_data_map = {}
+    for row in companies:
         company_name = row['firm']
         safe_filename = "".join(c for c in company_name if c.isalnum() or c == ' ').rstrip()
         filepath = os.path.join(OUTPUT_FOLDER, f"{safe_filename}.docx")
+        
         if os.path.exists(filepath):
             logging.info(f"Skipping {company_name}: Dossier already exists.")
             continue
-        logging.info(f"Processing: {company_name}")
-        summary = await get_ai_research_summary(company_name)
-        create_company_dossier(company_name, row, summary)
-        await asyncio.sleep(2)
+        
+        logging.info(f"Queueing research for: {company_name}")
+        tasks.append(get_ai_research_summary(client, company_name))
+        company_data_map[company_name] = row
+
+    ai_summaries = await asyncio.gather(*tasks)
+
+    for company_name, summary in zip(company_data_map.keys(), ai_summaries):
+        if "AI summary failed" not in summary:
+            award_data = company_data_map[company_name]
+            create_company_dossier(company_name, pd.Series(award_data), summary)
+        else:
+            logging.error(f"Could not generate dossier for {company_name} due to AI error.")
 
 async def run_phase_2():
+    """Wrapper to start the Phase 2 process."""
     logging.info("--- Phase 2 Started ---")
     await run_research_and_generate_dossiers(INPUT_FILENAME)
     logging.info("--- Phase 2 Complete ---")
