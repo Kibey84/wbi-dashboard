@@ -25,6 +25,7 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById(tabId).classList.add('active');
             if (tabId === projectTabId && pmFilter.options.length <= 1) {
                 populatePmFilter();
+                initializeBoeGenerator();
             }
         });
     });
@@ -287,7 +288,6 @@ document.addEventListener('DOMContentLoaded', () => {
             if (event.target.classList.contains('generate-save-btn')) {
                 const button = event.target;
                 
-                // **CORRECTED SELECTOR**
                 const card = button.closest('.bg-gray-50');
                 if (!card) {
                     console.error("Could not find the project card container!");
@@ -359,7 +359,6 @@ document.addEventListener('DOMContentLoaded', () => {
         `;
     }
 
-    // Initial population of the PM filter when the page first loads
     populatePmFilter();
 });
 
@@ -443,7 +442,6 @@ function initializeBoeGenerator() {
     
     if(estimateBtn) estimateBtn.addEventListener('click', handleAIEstimate);
     
-    // --- THIS BLOCK IS NOW FIXED ---
     const dropZone = document.getElementById('drop-zone');
     if (dropZone) {
         dropZone.addEventListener('dragover', (e) => {
@@ -706,7 +704,6 @@ async function handleAIEstimate() {
     spinner.classList.remove('hidden');
     btnText.textContent = "Estimating...";
 
-    // Build the request in the format the backend expects
     const scope = document.getElementById('scope').value || '';
     const pop = document.getElementById('pop').value || '';
     const personnel = Array.from(document.querySelectorAll('#personnel-checkboxes input:checked'))
@@ -894,5 +891,3 @@ function generateExcelFile(projectData, totals) {
     document.getElementById('download-excel').href = URL.createObjectURL(blob);
     document.getElementById('download-excel').download = `BoE_${projectData.project_title.replace(/\s+/g, '_')}_Full.xlsx`;
 }
-
-initializeBoeGenerator();

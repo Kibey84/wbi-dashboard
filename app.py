@@ -18,11 +18,9 @@ from tools import wbiops
 
 from azure.storage.blob import BlobServiceClient
 from openai import AsyncAzureOpenAI
-# Import the specific type for response_format
 from openai.types.chat import ChatCompletionMessageParam, ChatCompletionToolParam, ChatCompletionMessage
 
 # --- Configuration for AI Models ---
-# For GPT-4 (used for planning, validation, and summaries)
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
 AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY")
 AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT")
