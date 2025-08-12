@@ -41,6 +41,7 @@ def fetch_sam_gov_opportunities() -> list:
     module_logger.info("🔍 Scraping SAM.gov v2 via API (with pagination)...")
 
     api_key = os.getenv("SAM_GOV_API_KEY")
+    logging.info(f"[SAM.gov] API key loaded? {'YES' if api_key else 'NO'}")
     module_logger.info(f"SAM.gov API key loaded? {'YES' if api_key else 'NO'}")
     if not api_key or api_key.strip() == "":
         module_logger.error("❌ SAM.gov API key not set in environment. Skipping SAM.gov scrape.")

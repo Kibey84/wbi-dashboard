@@ -28,9 +28,9 @@ AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY")
 AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT")
 
 # For DeepSeek (used for the main BoE estimation task)
-DEEPSEEK_ENDPOINT = os.getenv("DEEPSEEK_AZURE_ENDPOINT")
-DEEPSEEK_KEY = os.getenv("DEEPSEEK_AZURE_KEY")
-DEEPSEEK_DEPLOYMENT = "WBI-Dash-DeepSeek"
+DEEPSEEK_ENDPOINT = os.getenv("DEEPSEEK_ENDPOINT")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+DEEPSEEK_DEPLOYMENT = os.getenv("DEEPSEEK_DEPLOYMENT", "WBI-Dash-DeepSeek")
 
 
 print("Flask App Loaded. ENV:", os.environ.get("AZURE_STORAGE_CONNECTION_STRING"))
@@ -319,12 +319,24 @@ def get_rates():
 
 @app.route('/api/estimate', methods=['POST'])
 async def api_estimate_boe():
+    logging.info(
+        "CREDS: AZURE(%s,%s,%s) DEEPSEEK(%s,%s,%s)",
+        "Y" if AZURE_OPENAI_ENDPOINT else "N",
+        "Y" if AZURE_OPENAI_KEY else "N",
+        "Y" if AZURE_OPENAI_DEPLOYMENT else "N",
+        "Y" if DEEPSEEK_ENDPOINT else "N",
+        "Y" if DEEPSEEK_API_KEY else "N",
+        "Y" if DEEPSEEK_DEPLOYMENT else "N",
+    )
     """Orchestrates a team of AI agents to generate a Basis of Estimate."""
-    if not all([AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_KEY, AZURE_OPENAI_DEPLOYMENT, DEEPSEEK_ENDPOINT, DEEPSEEK_KEY]):
+    if not all([AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_KEY, AZURE_OPENAI_DEPLOYMENT,
+                DEEPSEEK_ENDPOINT, DEEPSEEK_API_KEY, DEEPSEEK_DEPLOYMENT]):
         return jsonify({"error": "Server configuration error: AI credentials missing."}), 500
 
-    data = request.get_json()
-    if not data: return jsonify({"error": "Invalid request"}), 400
+    data = request.get_json(silent=True)
+    if not data:
+        logging.warning("(/api/estimate) no JSON body (content-type? payload?)")
+        return jsonify({"error": "Invalid request"}), 400
     
     new_request = data.get("new_request", "")
     case_history = data.get("case_history", "")
@@ -336,11 +348,19 @@ async def api_estimate_boe():
         assert AZURE_OPENAI_KEY is not None
         assert AZURE_OPENAI_DEPLOYMENT is not None
         assert DEEPSEEK_ENDPOINT is not None
-        assert DEEPSEEK_KEY is not None
+        assert DEEPSEEK_API_KEY is not None
         assert DEEPSEEK_DEPLOYMENT is not None
         
-        gpt4_client = AsyncAzureOpenAI(azure_endpoint=AZURE_OPENAI_ENDPOINT, api_key=AZURE_OPENAI_KEY, api_version="2024-02-01")
-        deepseek_client = AsyncAzureOpenAI(azure_endpoint=DEEPSEEK_ENDPOINT, api_key=DEEPSEEK_KEY, api_version="2024-02-01")
+        gpt4_client = AsyncAzureOpenAI(
+            azure_endpoint=AZURE_OPENAI_ENDPOINT,
+            api_key=AZURE_OPENAI_KEY,
+            api_version="2024-02-01"
+        )
+        deepseek_client = AsyncAzureOpenAI(
+            azure_endpoint=DEEPSEEK_ENDPOINT,  # e.g., https://wbi-dashboard-project-resource.services.ai.azure.com
+            api_key=DEEPSEEK_API_KEY,
+            api_version="2024-02-01"
+        )
 
         planner_system_prompt = "You are a strategic planner. Your job is to analyze a user's request and create a high-level, bulleted list of the key sections needed for a comprehensive Basis of Estimate (BOE)."
         planner_user_prompt = f"Create a high-level plan for a BOE based on this request:\n\n{new_request}"
@@ -422,9 +442,24 @@ def create_formatted_boe_excel(project_data, totals):
         summary_ws.write('B13', totals['totalPrice'], total_currency_format)
         
         if project_data.get('work_plan'):
-            labor_data = [{'WBS Element': task['task_name'], **task['personnel'][0]} for task in project_data['work_plan']]
-            pd.DataFrame(labor_data).to_excel(writer, sheet_name='Labor Detail', index=False)
-            writer.sheets['Labor Detail'].set_column('A:A', 40)
+            labor_rows = []
+            for task in project_data['work_plan']:
+                task_name = task.get('task') or task.get('task_name') or 'Task'
+                if isinstance(task.get('hours'), dict):
+                    row = {'WBS Element': task_name}
+                    row.update(task['hours'])
+                    labor_rows.append(row)
+                elif isinstance(task.get('personnel'), list) and task['personnel']:
+                    row = {'WBS Element': task_name}
+                    if isinstance(task['personnel'][0], dict):
+                        row.update(task['personnel'][0])
+                    labor_rows.append(row)
+                else:
+                    labor_rows.append({'WBS Element': task_name})
+
+            if labor_rows:
+                pd.DataFrame(labor_rows).to_excel(writer, sheet_name='Labor Detail', index=False)
+                writer.sheets['Labor Detail'].set_column('A:A', 40)
 
         for sheet_name, data_key in [('Materials & Tools', 'materials_and_tools'), ('Travel', 'travel'), ('Subcontracts', 'subcontracts')]:
             if project_data.get(data_key):

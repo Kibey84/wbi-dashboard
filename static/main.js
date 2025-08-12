@@ -701,37 +701,58 @@ async function handleAIEstimate() {
     const btn = document.getElementById('ai-estimate-btn');
     const spinner = document.getElementById('ai-spinner');
     const btnText = document.getElementById('ai-btn-text');
-    btn.disabled = true; spinner.classList.remove('hidden'); btnText.textContent = "Estimating...";
-    
-    const personnel = Array.from(document.querySelectorAll('#personnel-checkboxes input:checked')).map(cb => cb.value);
+
+    btn.disabled = true;
+    spinner.classList.remove('hidden');
+    btnText.textContent = "Estimating...";
+
+    // Build the request in the format the backend expects
+    const scope = document.getElementById('scope').value || '';
+    const pop = document.getElementById('pop').value || '';
+    const personnel = Array.from(document.querySelectorAll('#personnel-checkboxes input:checked'))
+        .map(cb => cb.value);
+
     if (personnel.length === 0) {
         alert("Please select at least one personnel role.");
-        btn.disabled = false; spinner.classList.add('hidden'); btnText.textContent = "AI Estimate Full Project";
+        btn.disabled = false;
+        spinner.classList.add('hidden');
+        btnText.textContent = "AI Estimate Full Project";
         return;
     }
-    
-    const scope = document.getElementById('scope').value;
-    const pop = document.getElementById('pop').value;
-    const originalPrompt = `**Scope of Work:** ${scope}\n**Period of Performance:** ${pop} months\n**Available Personnel:** ${personnel.join(', ')}`;
-    
+
+const new_request = `**Scope of Work:** ${scope}
+**Period of Performance:** ${pop} months
+**Available Personnel:** ${personnel.join(', ')}`;
+
+    const case_history = ""; 
+
     try {
         const response = await fetch('/api/estimate', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ originalPrompt, personnel })
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ new_request, case_history })
         });
-        if (!response.ok) { throw new Error(`Server Error: ${response.statusText}`); }
-        
+
+        if (!response.ok) {
+            const msg = await response.text().catch(() => '');
+            throw new Error(`Server Error (${response.status}): ${msg || response.statusText}`);
+        }
+
         const aiResponse = await response.json();
-        
+
         if (aiResponse) {
             updateUIFromData(aiResponse);
-            document.querySelector('button[data-boetab="labor"]').click();
+
+            const laborTabBtn = document.querySelector('button[data-boetab="labor"]');
+            if (laborTabBtn) laborTabBtn.click();
         }
     } catch (error) {
         console.error("AI Estimation Error:", error);
         alert("Failed to get an estimate from the AI. Check the server console for errors.");
     } finally {
-        btn.disabled = false; spinner.classList.add('hidden'); btnText.textContent = "AI Estimate Full Project";
+        btn.disabled = false;
+        spinner.classList.add('hidden');
+        btnText.textContent = "AI Estimate Full Project";
     }
 }
 

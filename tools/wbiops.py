@@ -12,6 +12,8 @@ import asyncio
 import re
 import inspect
 
+logging.info(f"Using SAM_GOV_API_KEY present? {'YES' if bool(os.getenv('SAM_GOV_API_KEY')) else 'NO'}")
+
 # --- Azure AI Inference Imports ---
 from azure.ai.inference.aio import ChatCompletionsClient
 from azure.ai.inference.models import SystemMessage, UserMessage
@@ -103,10 +105,12 @@ def load_scraper_config():
         if hasattr(sys.modules[__name__], func_name):
             scraper['function'] = getattr(sys.modules[__name__], func_name)
             valid.append(scraper)
+        logging.info("Loaded scrapers: " + ", ".join(s['name'] for s in valid))
     return valid
 
 def run_scraper_task(scraper_config):
     name = scraper_config['name']
+    logging.info(f"▶️ Running scraper: {scraper_config['name']}")
     try:
         target_func = scraper_config['function']
         valid_params = inspect.signature(target_func).parameters
