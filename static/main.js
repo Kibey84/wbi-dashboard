@@ -424,6 +424,8 @@ function initializeBoeGenerator() {
             reader.readAsDataURL(blob);
         }).catch(err => console.error("Could not pre-load logo for PDF:", err));
 
+    console.log('[BoE] fetching /api/rates …');
+    
     fetch('/api/rates')
         .then(response => { if (!response.ok) { throw new Error('Network response was not ok'); } return response.json(); })
         .then(data => {
@@ -757,32 +759,59 @@ async function handleAIEstimate() {
 **Period of Performance:** ${pop} months
 **Available Personnel:** ${personnel.join(', ')}`;
 
-    const case_history = ""; 
+    const case_history = "";
+
+    const controller = new AbortController();
+    const timeoutMs = 30000; // 30s
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    console.log('[AI] Sending /api/estimate …', { timeoutMs, payloadPreview: new_request.slice(0, 200) + '…' });
 
     try {
         const response = await fetch('/api/estimate', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ new_request, case_history })
+            body: JSON.stringify({ new_request, case_history }),
+            signal: controller.signal
         });
 
+        console.log('[AI] /api/estimate response:', response.status, response.statusText);
+
         if (!response.ok) {
-            const msg = await response.text().catch(() => '');
-            throw new Error(`Server Error (${response.status}): ${msg || response.statusText}`);
+            let text = '';
+            try { text = await response.text(); } catch {}
+            const msg = `Server returned ${response.status} ${response.statusText}${text ? `\n\nBody:\n${text}` : ''}`;
+            console.error('[AI] Non-OK response:', msg);
+            alert(`AI Estimate failed.\n\n${msg}`);
+            return;
         }
 
-        const aiResponse = await response.json();
+        const aiResponse = await response.json().catch(err => {
+            console.error('[AI] JSON parse error:', err);
+            throw new Error('Response was not valid JSON.');
+        });
 
-        if (aiResponse) {
+        console.log('[AI] Parsed JSON:', aiResponse);
+
+        if (aiResponse && typeof aiResponse === 'object') {
             updateUIFromData(aiResponse);
 
             const laborTabBtn = document.querySelector('button[data-boetab="labor"]');
             if (laborTabBtn) laborTabBtn.click();
+        } else {
+            alert('AI returned an unexpected payload. Check console for details.');
+            console.warn('[AI] Unexpected payload:', aiResponse);
         }
     } catch (error) {
-        console.error("AI Estimation Error:", error);
-        alert("Failed to get an estimate from the AI. Check the server console for errors.");
+        if (error.name === 'AbortError') {
+            console.error('[AI] Request timed out after', timeoutMs, 'ms');
+            alert(`AI Estimate timed out after ${timeoutMs/1000}s. Check server availability or logs.`);
+        } else {
+            console.error('[AI] Estimation error:', error);
+            alert(`Failed to get an estimate: ${error.message}`);
+        }
     } finally {
+        clearTimeout(timeoutId);
         btn.disabled = false;
         spinner.classList.add('hidden');
         btnText.textContent = "AI Estimate Full Project";
