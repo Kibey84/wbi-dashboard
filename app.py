@@ -9,6 +9,7 @@ import logging
 import threading
 import uuid
 import re
+import traceback
 from xlsxwriter.workbook import Workbook
 from typing import cast, Optional, Dict, Any
 from fpdf import FPDF
@@ -19,7 +20,7 @@ from tools import wbiops
 
 from azure.storage.blob import BlobServiceClient
 
-# Azure OpenAI (kept for update-summary route only)
+# Azure OpenAI (kept for /api/update_project summary)
 from openai import AsyncAzureOpenAI
 
 # DeepSeek via Azure AI Inference (per Foundry)
@@ -28,36 +29,41 @@ from azure.ai.inference.models import SystemMessage, UserMessage, AssistantMessa
 from azure.core.credentials import AzureKeyCredential
 
 # -----------------------------
+# App / Debug
+# -----------------------------
+APP_DEBUG = os.getenv("APP_DEBUG", "1") != "0"
+
+# -----------------------------
 # AI Call Settings (tunable)
 # -----------------------------
 AI_TIMEOUT_S = int(os.getenv("AI_TIMEOUT_S", "60"))
 AI_RETRIES = int(os.getenv("AI_RETRIES", "2"))
 
 # --- Configuration for Azure OpenAI (used by /api/update_project summary) ---
-AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
-AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY")
-AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "").strip()
+AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY", "").strip()
+AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "").strip()
 
 # --- DeepSeek via Azure AI Inference (Foundry) ---
-DEEPSEEK_ENDPOINT = os.getenv("DEEPSEEK_ENDPOINT", "").strip()
+DEEPSEEK_ENDPOINT_RAW = os.getenv("DEEPSEEK_ENDPOINT", "").strip()
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "").strip()
-# Use the Foundry "Model name" (e.g., "DeepSeek-R1-0528")
 DEEPSEEK_MODEL_NAME = os.getenv("DEEPSEEK_DEPLOYMENT", "DeepSeek-R1-0528").strip()
+DEEPSEEK_API_VERSION = os.getenv("DEEPSEEK_API_VERSION", "2024-05-01-preview").strip()
 
 def _normalize_models_endpoint(url: str) -> str:
     if not url:
         return url
-    u = url.rstrip("/")
-    # if someone pasted the full chat/completions URL, trim it back to /models
+    u = url.strip()
     if "/models/chat/completions" in u:
         u = u.split("/models/chat/completions", 1)[0]
+    u = u.rstrip("/")
     if not u.endswith("/models"):
         u = u + "/models"
     return u
 
-DEEPSEEK_ENDPOINT = _normalize_models_endpoint(DEEPSEEK_ENDPOINT)
+DEEPSEEK_ENDPOINT = _normalize_models_endpoint(DEEPSEEK_ENDPOINT_RAW)
 
-print("Flask App Loaded. ENV:", os.environ.get("AZURE_STORAGE_CONNECTION_STRING"))
+print("Flask App Loaded. ENV(AZURE_STORAGE_CONNECTION_STRING):", bool(os.environ.get("AZURE_STORAGE_CONNECTION_STRING")))
 
 basedir = os.path.abspath(os.path.dirname(__file__))
 app = Flask(
@@ -162,23 +168,27 @@ def load_project_data():
 
 def _extract_json_from_response(text: str) -> Optional[Dict]:
     """Robustly extracts a JSON object from a string, even with surrounding text."""
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
     match = re.search(r'\{.*\}', text, re.DOTALL)
     if match:
         try:
             return json.loads(match.group(0))
         except json.JSONDecodeError:
-            logging.error(f"Failed to decode extracted JSON: {match.group(0)}")
+            logging.error(f"Failed to decode extracted JSON: {match.group(0)[:500]}")
             return None
-    logging.error(f"No valid JSON object found in response: {text}")
+    logging.error("No valid JSON object found in response.")
     return None
 
 # ==============================================================================
-# --- ASYNC AI HELPERS
-#   * Azure OpenAI (update summary) uses AsyncAzureOpenAI
-#   * DeepSeek (estimate) uses Azure AI Inference ChatCompletionsClient
+# --- ASYNC AI HELPERS ---
 # ==============================================================================
 
-# -------- Azure OpenAI helper (kept for update summary route) --------
+# -------- Azure OpenAI helper --------
 async def _call_ai_agent(
     client: Any,  # AsyncAzureOpenAI 
     deployment: str,
@@ -203,8 +213,6 @@ async def _call_ai_agent(
                 "temperature": 0.2,
                 "max_tokens": 2048,
             }
-            # NOTE: response_format is specific to OpenAI Responses API.
-            # For Azure OpenAI Chat Completions we do not pass it.
             resp = await asyncio.wait_for(
                 client.chat.completions.create(**kwargs),
                 timeout=AI_TIMEOUT_S,
@@ -229,30 +237,26 @@ async def _call_ai_agent(
 
 async def get_improved_ai_summary(description: str, update: str):
     """Asynchronously gets an improved summary for a project update (Azure OpenAI)."""
-    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-    key = os.getenv("AZURE_OPENAI_KEY")
-    deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+    endpoint = AZURE_OPENAI_ENDPOINT
+    key = AZURE_OPENAI_KEY
+    deployment_name = AZURE_OPENAI_DEPLOYMENT
 
     if not all([endpoint, key, deployment_name]) or not update:
         logging.error("Azure OpenAI environment variables missing or no update provided.")
         return "Azure OpenAI not configured or no update provided."
     
-    endpoint_str = cast(str, endpoint)
-    key_str = cast(str, key)
-    deployment_str = cast(str, deployment_name)
-
     system_prompt = "You are an expert Project Manager. Rewrite the brief update into a crisp, professional monthly status sentence or two."
     user_prompt = f"**Project Description:**\n{description}\n\n**Brief Update:**\n{update}\n\n**Rewritten Update:**"
     
     client: Optional[AsyncAzureOpenAI] = None
     try:
-        client = AsyncAzureOpenAI(azure_endpoint=endpoint_str, api_key=key_str, api_version="2024-02-01")
-        return await _call_ai_agent(client, deployment_str, system_prompt, user_prompt)
+        client = AsyncAzureOpenAI(azure_endpoint=endpoint, api_key=key, api_version="2024-02-01")
+        return await _call_ai_agent(client, deployment_name, system_prompt, user_prompt)
     finally:
         if client:
             await client.close()
 
-# -------- DeepSeek (Azure AI Inference) helpers for /api/estimate --------
+# -------- DeepSeek helpers for /api/estimate --------
 _deepseek_client: Optional[ChatCompletionsClient] = None
 
 def _get_deepseek_client() -> ChatCompletionsClient:
@@ -263,7 +267,7 @@ def _get_deepseek_client() -> ChatCompletionsClient:
         _deepseek_client = ChatCompletionsClient(
             endpoint=DEEPSEEK_ENDPOINT,
             credential=AzureKeyCredential(DEEPSEEK_API_KEY),
-            api_version="2024-05-01-preview",
+            api_version=DEEPSEEK_API_VERSION,
         )
     return _deepseek_client
 
@@ -298,6 +302,30 @@ async def _deepseek_complete(
         return text
 
     return await asyncio.to_thread(_call)
+
+@app.route("/api/ai/diag", methods=["GET"])
+def ai_diag():
+    try:
+        client = _get_deepseek_client()
+        resp = client.complete(
+            messages=[SystemMessage(content="You are a health check."), UserMessage(content="Respond with OK")],
+            max_tokens=5,
+            model=DEEPSEEK_MODEL_NAME,
+        )
+        out = (resp.choices[0].message.content or "").strip()
+        return jsonify({
+            "ok": True,
+            "endpoint": DEEPSEEK_ENDPOINT,
+            "model": DEEPSEEK_MODEL_NAME,
+            "api_version": DEEPSEEK_API_VERSION,
+            "response": out[:100]
+        })
+    except Exception as e:
+        logging.error("DeepSeek diag failed: %s", e, exc_info=True)
+        body = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        if APP_DEBUG:
+            body["trace"] = traceback.format_exc()[-1500:]
+        return jsonify(body), 500
 
 # ==============================================================================
 # --- FLASK API ROUTES ---
@@ -337,8 +365,10 @@ def api_parse_org_chart():
         return jsonify({"error": "Processing failed"}), 500
     except Exception as e:
         logging.error(f"Org chart parsing failed: {e}", exc_info=True)
-        # More explicit error body helps during dev
-        return jsonify({"error": f"Org chart parse failed: {type(e).__name__}: {e}"}), 500
+        body = {"error": f"Org chart parse failed: {type(e).__name__}: {e}"}
+        if APP_DEBUG:
+            body["trace"] = traceback.format_exc()[-1500:]
+        return jsonify(body), 500
 
 @app.route('/api/pms')
 def api_get_pms():
@@ -448,24 +478,24 @@ async def api_estimate_boe():
     """
     Orchestrates a team of AI agents to generate a Basis of Estimate using DeepSeek on Azure AI Inference.
     """
-    logging.info(
-        "DeepSeek config: endpoint=%s model=%s key=%s",
-        "set" if DEEPSEEK_ENDPOINT else "MISSING",
-        DEEPSEEK_MODEL_NAME or "MISSING",
-        "set" if DEEPSEEK_API_KEY else "MISSING",
-    )
-
-    if not (DEEPSEEK_ENDPOINT and DEEPSEEK_API_KEY and DEEPSEEK_MODEL_NAME):
-        return jsonify({"error": "Server configuration error: DeepSeek credentials missing."}), 500
-
-    data = request.get_json(silent=True) or {}
-    new_request = (data.get("new_request") or "").strip()
-    case_history = (data.get("case_history") or "").strip()
-
-    if not new_request:
-        return jsonify({"error": "New request data is missing."}), 400
-
     try:
+        logging.info(
+            "DeepSeek config: endpoint=%s model=%s key=%s",
+            "set" if DEEPSEEK_ENDPOINT else "MISSING",
+            DEEPSEEK_MODEL_NAME or "MISSING",
+            "set" if DEEPSEEK_API_KEY else "MISSING",
+        )
+
+        if not (DEEPSEEK_ENDPOINT and DEEPSEEK_API_KEY and DEEPSEEK_MODEL_NAME):
+            return jsonify({"error": "Server configuration error: DeepSeek credentials missing."}), 500
+
+        data = request.get_json(silent=True) or {}
+        new_request = (data.get("new_request") or "").strip()
+        case_history = (data.get("case_history") or "").strip()
+
+        if not new_request:
+            return jsonify({"error": "New request data is missing."}), 400
+
         # 1) Planner (high-level plan)
         planner_system = (
             "You are a strategic planner. Analyze the user's request and create a concise, bulleted outline "
@@ -488,7 +518,7 @@ async def api_estimate_boe():
             f"**New Request:**\n{new_request}\n\n"
             f"Produce the JSON now."
         )
-        detailed_json_text = await _deepseek_complete(estimator_system, estimator_user, max_tokens=1500)
+        detailed_json_text = await _deepseek_complete(estimator_system, estimator_user, max_tokens=1800)
         logging.info("Estimator output length=%d", len(detailed_json_text))
 
         # 3) Finalizer (single final JSON object in our canonical BOE schema)
@@ -504,23 +534,29 @@ async def api_estimate_boe():
             f"**Detailed Estimation Data (JSON):**\n{detailed_json_text}\n\n"
             f"Output the final JSON object now."
         )
-        final_json_str = await _deepseek_complete(finalizer_system, finalizer_user, max_tokens=1500)
+        final_json_str = await _deepseek_complete(finalizer_system, finalizer_user, max_tokens=1800)
 
         final_json = _extract_json_from_response(final_json_str)
         if not final_json:
-            # Try a simple cleanup (e.g., model wrapped in backticks)
             cleaned = final_json_str.strip().strip("`")
             try:
                 final_json = json.loads(cleaned)
-            except Exception:
-                logging.error("Final JSON could not be parsed:\n%s", final_json_str[:1500])
-                return jsonify({"error": "The AI did not return valid JSON."}), 502
+            except Exception as parse_err:
+                logging.error("Final JSON parse failed: %s", parse_err, exc_info=True)
+                body = {"error": "The AI did not return valid JSON."}
+                if APP_DEBUG:
+                    body["raw"] = final_json_str[:1500]
+                return jsonify(body), 502
 
         return jsonify(final_json), 200
 
     except Exception as e:
         logging.error("Error in /api/estimate: %s", e, exc_info=True)
-        return jsonify({"error": "An internal server error occurred during AI processing."}), 500
+        body = {"error": "An internal server error occurred during AI processing."}
+        if APP_DEBUG:
+            body["detail"] = f"{type(e).__name__}: {e}"
+            body["trace"] = traceback.format_exc()[-1500:]
+        return jsonify(body), 500
 
 @app.route('/api/generate-boe-excel', methods=['POST'])
 def generate_boe_excel():
