@@ -1,3 +1,4 @@
+// document.addEventListener('DOMContentLoaded', () => {
 document.addEventListener('DOMContentLoaded', () => {
     let dotsInterval;
     function startDots() {
@@ -25,7 +26,6 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById(tabId).classList.add('active');
             if (tabId === projectTabId && pmFilter.options.length <= 1) {
                 populatePmFilter();
-                initializeBoeGenerator();
             }
         });
     });
@@ -325,46 +325,82 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function createProjectCardHTML(project) {
-        const now = new Date();
-        const currentYear = now.getFullYear();
-        const currentMonth = now.toLocaleString('default', { month: 'long' });
-        const months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    const now = new Date();
+    const currentYear = now.getFullYear();
+    const currentMonth = now.toLocaleString('default', { month: 'long' });
+    const months = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 
-        return `
-            <div class="bg-white rounded-xl shadow-md p-6 border border-gray-200">
-                <div class="flex justify-between items-start">
-                    <h3 class="text-xl font-bold text-gray-800" data-project-name="${project.projectName}">${project.projectName}</h3>
-                    <span class="px-3 py-1 text-sm font-medium rounded-full ${project.status === 'Active' ? 'bg-green-100 text-green-800' : 'bg-gray-200 text-gray-800'}">${project.status}</span>
-                </div>
-                <div class="text-sm text-gray-500 mt-2 border-b pb-4 mb-4">
-                    <span><strong>PI:</strong> ${project.pi || 'N/A'}</span> | 
-                    <span><strong>PM:</strong> ${project.pm || 'N/á'}</span> | 
-                    <span><strong>End Date:</strong> ${project.endDate || 'N/A'}</span>
-                </div>
-                <details class="mb-4" open>
-                    <summary class="cursor-pointer font-medium text-blue-600 hover:underline">Project Description</summary>
-                    <p class="text-gray-600 mt-2 p-3 bg-gray-50 rounded-md">${project.description || 'No description available.'}</p>
-                </details>
-                <div class="bg-gray-50 p-4 rounded-lg">
-                    <h4 class="font-semibold text-gray-700 mb-3">Submit Monthly Update</h4>
-                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-3">
-                        <div><label class="block text-sm font-medium text-gray-600">Month</label><select class="month-select mt-1 block w-full p-2 border border-gray-300 rounded-md">${months.map(m => `<option ${m === currentMonth ? 'selected' : ''}>${m}</option>`).join('')}</select></div>
-                        <div><label class="block text-sm font-medium text-gray-600">Year</label><input type="number" class="year-input mt-1 block w-full p-2 border border-gray-300 rounded-md" value="${currentYear}"></div>
-                    </div>
-                    <div><label class="block text-sm font-medium text-gray-600">Your Update</label><textarea class="manager-update-textarea mt-1 block w-full p-2 border border-gray-300 rounded-md" rows="4" placeholder="Enter your monthly progress update here..."></textarea></div>
-                    <div class="mt-4"><label class="block text-sm font-medium text-gray-600">AI-Generated Quarterly Summary</label><div class="ai-summary-box mt-1 block w-full p-2 bg-white border border-gray-300 rounded-md min-h-[100px]"></div></div>
-                    <button class="generate-save-btn mt-4 w-full md:w-auto float-right bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg transition duration-200" data-project-name="${project.projectName}" data-description="${project.description}">Generate & Save</button>
-                </div>
+    const optionsHtml = months
+        .map(m => '<option ' + (m === currentMonth ? 'selected' : '') + '>' + m + '</option>')
+        .join('');
+
+    const statusBadge =
+        (project.status === 'Active')
+            ? 'bg-green-100 text-green-800'
+            : 'bg-gray-200 text-gray-800';
+
+    return `
+        <div class="bg-white rounded-xl shadow-md p-6 border border-gray-200">
+            <div class="flex justify-between items-start">
+                <h3 class="text-xl font-bold text-gray-800" data-project-name="${project.projectName}">${project.projectName}</h3>
+                <span class="px-3 py-1 text-sm font-medium rounded-full ${statusBadge}">${project.status}</span>
             </div>
-        `;
-    }
+            <div class="text-sm text-gray-500 mt-2 border-b pb-4 mb-4">
+                <span><strong>PI:</strong> ${project.pi || 'N/A'}</span> |
+                <span><strong>PM:</strong> ${project.pm || 'N/A'}</span> |
+                <span><strong>End Date:</strong> ${project.endDate || 'N/A'}</span>
+            </div>
+            <details class="mb-4" open>
+                <summary class="cursor-pointer font-medium text-blue-600 hover:underline">Project Description</summary>
+                <p class="text-gray-600 mt-2 p-3 bg-gray-50 rounded-md">${project.description || 'No description available.'}</p>
+            </details>
+            <div class="bg-gray-50 p-4 rounded-lg">
+                <h4 class="font-semibold text-gray-700 mb-3">Submit Monthly Update</h4>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-3">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-600">Month</label>
+                        <select class="month-select mt-1 block w-full p-2 border border-gray-300 rounded-md">
+                            ${optionsHtml}
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-600">Year</label>
+                        <input type="number" class="year-input mt-1 block w-full p-2 border border-gray-300 rounded-md" value="${currentYear}">
+                    </div>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-600">Your Update</label>
+                    <textarea class="manager-update-textarea mt-1 block w-full p-2 border border-gray-300 rounded-md" rows="4" placeholder="Enter your monthly progress update here..."></textarea>
+                </div>
+                <div class="mt-4">
+                    <label class="block text-sm font-medium text-gray-600">AI-Generated Quarterly Summary</label>
+                    <div class="ai-summary-box mt-1 block w-full p-2 bg-white border border-gray-300 rounded-md min-h-[100px]"></div>
+                </div>
+                <button
+                    class="generate-save-btn mt-4 w-full md:w-auto float-right bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg transition duration-200"
+                    data-project-name="${project.projectName}"
+                    data-description="${project.description}">
+                    Generate & Save
+                </button>
+            </div>
+        </div>
+    `;
+}
 
     populatePmFilter();
-});
+
+    try {
+        if (!window._boeInitOnce) {
+            window._boeInitOnce = true;
+            }
+    } catch (e) {
+        console.error('[BoE] init failed:', e);
+    }
+    populatePmFilter();
+    initializeBoeGenerator();   
+});   
 
 // --- BoE Generator Logic ---
-
-// Global variables for the BoE tool
 let LABOR_RATES = {};
 let logoBase64 = '';
 const OVERHEAD_RATE = 0.17;
@@ -377,9 +413,9 @@ function formatCurrency(value) {
     return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(num);
 }
 
-// Function to initialize all BoE-related event listeners
-
 function initializeBoeGenerator() {
+    console.log('[BoE] init start');
+
     fetch('/static/images/wbi-logo-horz.png')
         .then(response => { if (!response.ok) throw new Error('Logo not found'); return response.blob(); })
         .then(blob => {
@@ -717,7 +753,7 @@ async function handleAIEstimate() {
         return;
     }
 
-const new_request = `**Scope of Work:** ${scope}
+    const new_request = `**Scope of Work:** ${scope}
 **Period of Performance:** ${pop} months
 **Available Personnel:** ${personnel.join(', ')}`;
 
