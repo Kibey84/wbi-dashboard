@@ -58,7 +58,7 @@ UPDATES_FILE = 'updates.csv'
 if not logging.getLogger().hasHandlers():
     logging.basicConfig(level=logging.INFO)
 
-pipeline_jobs = {}
+pipeline_jobs: Dict[str, Dict[str, Any]] = {}
 
 # ==============================================================================
 # --- CORE APPLICATION LOGIC & HELPER FUNCTIONS ---
@@ -155,7 +155,7 @@ def _extract_json_from_response(text: str) -> Optional[Dict]:
     return None
 
 # ==============================================================================
-# --- ASYNCHRONOUS AI HELPER FUNCTIONS ---
+# --- ASYNCHRONOUS AI HELPER FUNCTIONS (FIXED) ---
 # ==============================================================================
 
 async def _call_ai_agent(
@@ -166,44 +166,34 @@ async def _call_ai_agent(
     is_json: bool = False
 ) -> str:
     """
-    Call an async Azure OpenAI (or compatible) client with retries + timeout.
-    Returns plain text (or JSON text when is_json=True).
-    Raises ValueError on failure.
+    Calls the Chat Completions API (works for Azure OpenAI and DeepSeek via Azure/Azure AI).
+    Uses JSON mode when is_json=True. Retries + timeout included.
+    Returns the message content as text (JSON text when is_json=True).
     """
     last_err: Optional[Exception] = None
 
     for attempt in range(1, AI_RETRIES + 2):
         try:
+            kwargs: Dict[str, Any] = {
+                "model": deployment,
+                "messages": [
+                    {"role": "system", "content": sys_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": 0.2,
+                "max_tokens": 2048,
+            }
+            if is_json:
+                kwargs["response_format"] = {"type": "json_object"}
+
             resp = await asyncio.wait_for(
-                client.responses.create(  # type: ignore[call-arg]
-                    model=deployment,
-                    input=[
-                        {"role": "system", "content": sys_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    response_format={"type": "json_object"} if is_json else None,
-                    max_output_tokens=2048,
-                ),
+                client.chat.completions.create(**kwargs),
                 timeout=AI_TIMEOUT_S,
             )
 
-            txt: Optional[str] = None
-            if hasattr(resp, "output_text") and resp.output_text:
-                txt = resp.output_text
-            else:
-                output = getattr(resp, "output", None)
-                if output and len(output) > 0:
-                    content = getattr(output[0], "content", None)
-                    if content:
-                        parts = []
-                        for p in content:
-                            if getattr(p, "type", None) in ("output_text", "text") and getattr(p, "text", None):
-                                parts.append(p.text)
-                        if parts:
-                            txt = "".join(parts)
-
-            if txt and txt.strip():
-                return txt
+            content = resp.choices[0].message.content if resp.choices and resp.choices[0].message else None
+            if content and content.strip():
+                return content
 
             last_err = ValueError("AI returned an empty response.")
             logging.warning(f"AI attempt {attempt} returned empty text.")
@@ -219,7 +209,7 @@ async def _call_ai_agent(
     raise ValueError(str(last_err) if last_err else "AI call failed.")
 
 async def get_improved_ai_summary(description: str, update: str):
-    """Asynchronously gets an improved summary for a project update."""
+    """Asynchronously gets an improved summary for a project update (Azure OpenAI)."""
     endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
     key = os.getenv("AZURE_OPENAI_KEY")
     deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT")
@@ -232,7 +222,7 @@ async def get_improved_ai_summary(description: str, update: str):
     key_str = cast(str, key)
     deployment_str = cast(str, deployment_name)
 
-    system_prompt = "You are an expert Project Manager... (rest of your prompt)"
+    system_prompt = "You are an expert Project Manager. Rewrite the brief update into a crisp, professional monthly status sentence or two."
     user_prompt = f"**Project Description:**\n{description}\n\n**Brief Update:**\n{update}\n\n**Rewritten Update:**"
     
     client: Optional[AsyncAzureOpenAI] = None
@@ -430,7 +420,7 @@ async def api_estimate_boe():
             api_version="2024-02-01"
         )
         deepseek_client = AsyncAzureOpenAI(
-            azure_endpoint=ds_endpoint,  # e.g., https://wbi-dashboard-project-resource.services.ai.azure.com
+            azure_endpoint=ds_endpoint,  
             api_key=ds_key,
             api_version="2024-02-01"
         )
