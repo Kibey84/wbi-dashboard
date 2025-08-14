@@ -1,137 +1,149 @@
 import os
-import io
-import re
-import csv
 import json
-import time
-import uuid
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+import re
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-import uvicorn
-from fastapi import FastAPI, Body, UploadFile, File, Form, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, ValidationError, model_validator
-from dotenv import load_dotenv
+from flask import Flask, jsonify, request
 
-# Azure auth & SDKs
-from azure.identity import DefaultAzureCredential, get_bearer_token_provider
-from openai import AzureOpenAI 
-from azure.ai.inference import ChatCompletionsClient  
-from azure.ai.inference.models import SystemMessage, UserMessage
+# CORS is optional; include if installed. If not, the app still runs.
+try:
+    from flask_cors import CORS
+except Exception:  # pragma: no cover
+    CORS = None  # type: ignore
+
+# OpenAI SDKs (official)
+from openai import OpenAI, AzureOpenAI
+
 # ------------------------------------------------------------------------------
-# Environment & Logging
+# App setup
 # ------------------------------------------------------------------------------
-load_dotenv()
+app = Flask(__name__)
 
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+if CORS is not None:
+    CORS(app, resources={r"/*": {"origins": "*"}})
+
 logging.basicConfig(
-    level=LOG_LEVEL,
-    format="%(asctime)s %(levelname)s:%(name)s:%(lineno)d %(message)s",
+    level=os.environ.get("LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)s %(name)s :: %(message)s",
 )
 logger = logging.getLogger("wbi-app")
 
-CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()]
+# ------------------------------------------------------------------------------
+# Helpers: JSON responses and error handling
+# ------------------------------------------------------------------------------
+def ok_json(data: Any, status: int = 200):
+    return jsonify(data), status
 
-GPT41_ENDPOINT = os.getenv("GPT41_ENDPOINT", "").strip()
-GPT41_DEPLOYMENT = os.getenv("GPT41_DEPLOYMENT", "").strip()
 
-DEEPSEEK_ENDPOINT = os.getenv("ENDPOINT", "").strip()
-DEEPSEEK_DEPLOYMENT = os.getenv("MODEL_NAME", "").strip()
+def err_json(message: str, status: int = 500, *, details: Optional[Dict[str, Any]] = None):
+    payload: Dict[str, Any] = {"error": message}
+    if details:
+        payload["details"] = details
+    return jsonify(payload), status
 
-AZURE_PROJECT_CONNECTION_STRING = os.getenv("AZURE_PROJECT_CONNECTION_STRING", "").strip()
-AZURE_AGENT_ID = os.getenv("AZURE_AGENT_ID", "").strip()
 
-RATES_PATH = os.getenv("RATES_PATH", "./rates.json").strip()
+@app.errorhandler(Exception)
+def on_unhandled_error(e: Exception):
+    logger.exception("Unhandled error")
+    return err_json("Internal server error", 500)
+
+
+@app.get("/healthz")
+def healthz():
+    return ok_json({"ok": True}, 200)
+
 
 # ------------------------------------------------------------------------------
-# FastAPI app
+# Robust JSON extraction (NO recursive regex; safe for Pylance and Python re)
 # ------------------------------------------------------------------------------
-app = FastAPI(title="WBI Dashboard API", version="1.1.1")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=CORS_ORIGINS or ["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ------------------------------------------------------------------------------
-# Utilities: robust JSON extraction
+# Strategy:
+# 1) Try whole text as JSON.
+# 2) Scan for first balanced {...} block using brace counting.
+# 3) If braces are unbalanced in that block, attempt simple right-side padding.
+# 4) As a last resort, strip trailing commas before closing } or ] and try again.
 # ------------------------------------------------------------------------------
 
-def extract_first_json_block(s: str) -> str | None:
-    start = s.find("{")
-    if start == -1:
-        return None
-
-    depth = 0
-    in_str = False
-    esc = False
-
-    for i, ch in enumerate(s[start:], start):
-        if in_str:
-            if esc:
-                esc = False
-            elif ch == "\\":
-                esc = True
-            elif ch == '"':
-                in_str = False
-        else:
-            if ch == '"':
-                in_str = True
-            elif ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    return s[start : i + 1]
+def _try_load_json(text: str) -> Optional[Dict[str, Any]]:
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        pass
     return None
 
+
 def _balanced_braces(s: str) -> bool:
-    stack = 0
-    in_str = False
-    esc = False
+    depth = 0
+    in_string = False
+    escape = False
     for ch in s:
-        if in_str:
-            if esc:
-                esc = False
-            elif ch == "\\":
-                esc = True
-            elif ch == '"':
-                in_str = False
+        if escape:
+            escape = False
+            continue
+        if ch == '\\':
+            escape = True
             continue
         if ch == '"':
-            in_str = True
-        elif ch == "{":
-            stack += 1
-        elif ch == "}":
-            stack -= 1
-            if stack < 0:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth < 0:
                 return False
-    return stack == 0 and not in_str
+    return depth == 0 and not in_string
 
-def _try_load_json(s: str) -> Optional[dict]:
-    try:
-        return json.loads(s)
-    except json.JSONDecodeError:
+
+def _find_first_json_block(text: str) -> Optional[str]:
+    # Find the first '{', then walk forward counting braces until balanced.
+    start = text.find("{")
+    if start == -1:
         return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape:
+            escape = False
+            continue
+        if ch == '\\':
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    # If we reach here, we saw an opening { but never fully closed
+    return text[start:]  # return the tail; caller may try to repair
 
-def extract_first_json(text: str) -> dict:
-    """Try to extract and parse the first JSON object from text, repairing if needed."""
+
+def extract_first_json(text: str) -> Dict[str, Any]:
+    # 1) Entire body?
     obj = _try_load_json(text)
     if obj is not None:
         return obj
 
-    block = extract_first_json_block(text)
+    # 2) First JSON-looking block
+    block = _find_first_json_block(text)
     if block:
         if _balanced_braces(block):
             obj = _try_load_json(block)
             if obj is not None:
                 return obj
-
+        # Try padding right braces if we clearly have more opens than closes
         opens = block.count("{")
         closes = block.count("}")
         if opens > closes:
@@ -141,462 +153,180 @@ def extract_first_json(text: str) -> dict:
                 if obj is not None:
                     return obj
 
+    # 3) Strip trailing commas like "...,}" or "...,]" across the whole text
     stripped = re.sub(r",\s*([\}\]])", r"\1", text)
     obj = _try_load_json(stripped)
     if obj is not None:
         return obj
 
     logger.error("Failed to decode extracted JSON from model output.")
-    raise HTTPException(status_code=502, detail="Model did not return valid JSON.")
+    # Keep Flask semantics (no FastAPI HTTPException here)
+    raise ValueError("Model did not return valid JSON.")
+
 
 # ------------------------------------------------------------------------------
-# Azure clients (two distinct stacks)
+# Client factories (match your env exactly)
 # ------------------------------------------------------------------------------
 
-_token_provider = get_bearer_token_provider(
-    DefaultAzureCredential(), "https://cognitiveservices.azure.com/.default"
-)
+def _require_env(name: str) -> str:
+    val = os.environ.get(name)
+    if not val:
+        raise KeyError(f"Missing required env var: {name}")
+    return val
 
-def get_gpt41_client() -> AzureOpenAI:
-    if not GPT41_ENDPOINT or not GPT41_DEPLOYMENT:
-        raise HTTPException(status_code=500, detail="GPT-4.1 config missing (GPT41_ENDPOINT / GPT41_DEPLOYMENT).")
+
+def make_azure_openai() -> AzureOpenAI:
+    # Uses: AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_VERSION, AZURE_OPENAI_KEY
     return AzureOpenAI(
-        azure_endpoint=GPT41_ENDPOINT,
-        azure_ad_token_provider=_token_provider,
-        api_version="2025-01-01-preview",
-        timeout=25,
+        api_key=_require_env("AZURE_OPENAI_KEY"),
+        api_version=_require_env("AZURE_OPENAI_API_VERSION"),
+        azure_endpoint=_require_env("AZURE_OPENAI_ENDPOINT"),
     )
 
-def get_deepseek_client() -> ChatCompletionsClient:
-    if not DEEPSEEK_ENDPOINT or not DEEPSEEK_DEPLOYMENT:
-        raise HTTPException(status_code=500, detail="DeepSeek config missing (ENDPOINT / MODEL_NAME).")
-    return ChatCompletionsClient(
-        endpoint=DEEPSEEK_ENDPOINT,
-        credential=DefaultAzureCredential(),
-        credential_scopes=["https://cognitiveservices.azure.com/.default"],
+
+def make_deepseek_public() -> OpenAI:
+    # Uses: DEEPSEEK_ENDPOINT (default https://api.deepseek.com), DEEPSEEK_API_KEY
+    base_url = os.environ.get("DEEPSEEK_ENDPOINT", "https://api.deepseek.com")
+    return OpenAI(base_url=base_url, api_key=_require_env("DEEPSEEK_API_KEY"))
+
+
+def make_deepseek_azure() -> AzureOpenAI:
+    # Uses: DEEPSEEK_AZURE_ENDPOINT, DEEPSEEK_AZURE_KEY, OPENAI_API_VERSION
+    return AzureOpenAI(
+        api_key=_require_env("DEEPSEEK_AZURE_KEY"),
+        api_version=_require_env("OPENAI_API_VERSION"),
+        azure_endpoint=_require_env("DEEPSEEK_AZURE_ENDPOINT"),
     )
 
-def get_project_client():
-    if not AZURE_PROJECT_CONNECTION_STRING or not AZURE_AGENT_ID:
-        raise HTTPException(status_code=500, detail="Agents config missing (AZURE_PROJECT_CONNECTION_STRING / AZURE_AGENT_ID).")
-    try:
-        from azure.ai.projects import AIProjectClient  # type: ignore
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"azure.ai.projects not available: {e}")
-    return AIProjectClient.from_connection_string(
-        credential=DefaultAzureCredential(),
-        conn_str=AZURE_PROJECT_CONNECTION_STRING
-    )
+
+def choose_client(provider: str) -> Tuple[str, Any, str]:
+    """
+    Returns (kind, client, model_or_deployment)
+
+    kind = "azure"   -> AzureOpenAI; `model` param must be your *deployment name*
+    kind = "public"  -> OpenAI-compatible; `model` is the model id (e.g., deepseek-chat)
+    """
+    if provider == "azure":
+        return ("azure", make_azure_openai(), _require_env("AZURE_OPENAI_DEPLOYMENT"))
+    if provider == "deepseek_azure":
+        return ("azure", make_deepseek_azure(), _require_env("DEEPSEEK_DEPLOYMENT"))
+    if provider == "deepseek_public":
+        return ("public", make_deepseek_public(), os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"))
+    raise ValueError(f"Unknown provider '{provider}' (expected: azure | deepseek_public | deepseek_azure)")
+
 
 # ------------------------------------------------------------------------------
-# Models
+# /chat endpoint
 # ------------------------------------------------------------------------------
-
-class EstimateRequest(BaseModel):
-    prompt: str
-    engine: str = Field(default="gpt41", description='Use "gpt41" or "deepseek"')
-    system_prompt: Optional[str] = "You are a careful analyst. Return only valid JSON."
-    temperature: float = Field(default=0.2, ge=0.0, le=2.0)
-    max_tokens: int = Field(default=800, ge=32, le=4096)
-
-    @model_validator(mode="after")
-    def _normalize(self) -> "EstimateRequest":
-        e = (self.engine or "gpt41").lower().strip()
-        if e not in ("gpt41", "deepseek"):
-            raise ValueError("engine must be 'gpt41' or 'deepseek'")
-        self.engine = e
-        return self
-
-class EstimateResponse(BaseModel):
-    id: str
-    engine: str
-    raw_text: str
-    json: Dict[str, Any]
-
-class OrgPerson(BaseModel):
-    name: str
-    title: Optional[str] = ""
-    manager: Optional[str] = None
-
-class OrgChartBody(BaseModel):
-    text: Optional[str] = None
-    people: Optional[List[OrgPerson]] = None
-
-    @model_validator(mode="after")
-    def _must_have_input(self) -> "OrgChartBody":
-        if not self.text and not self.people:
-            raise ValueError("Provide 'text' or 'people'.")
-        return self
-
-class AgentChatRequest(BaseModel):
-    message: str
-    session_id: Optional[str] = None
-    temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0)
-    max_output_tokens: Optional[int] = Field(default=None, ge=32, le=4096)
-
-# ------------------------------------------------------------------------------
-# AI calls
-# ------------------------------------------------------------------------------
-
-def call_gpt41(req: EstimateRequest) -> Tuple[str, str]:
-    client = get_gpt41_client()
-    logger.info("[AI gpt41] chat.completions.create …")
-    resp = client.chat.completions.create(
-        model=GPT41_DEPLOYMENT,
-        messages=[
-            {"role": "system", "content": req.system_prompt or "Return valid JSON."},
-            {"role": "user", "content": req.prompt},
-        ],
-        max_tokens=req.max_tokens,
-        temperature=req.temperature,
-    )
-    raw = resp.choices[0].message.content or ""
-    return raw, "gpt41"
-
-def call_deepseek(req: EstimateRequest) -> Tuple[str, str]:
-    client = get_deepseek_client()
-    logger.info("[AI deepseek] complete …")
-    result = client.complete(
-        model=DEEPSEEK_DEPLOYMENT,
-        messages=[
-            SystemMessage(content=req.system_prompt or "Return valid JSON."),
-            UserMessage(content=req.prompt),
-        ],
-        temperature=req.temperature,
-        max_tokens=req.max_tokens,
-        stream=False,
-    )
-
-    # 1) Preferred: SDK-style access
-    raw = ""
-    try:
-        if hasattr(result, "choices") and isinstance(result.choices, list) and result.choices:
-            msg = getattr(result.choices[0], "message", None)
-            if msg is not None and getattr(msg, "content", None):
-                raw = str(msg.content)
-    except Exception:
-        pass
-
-    if raw:
-        return raw, "deepseek"
-
-    # 2) Fallback: dict-like serialization, with strict type guards
-    d: Dict[str, Any] = {}
-    try:
-        as_dict = getattr(result, "as_dict", None)
-        if callable(as_dict):
-            maybe = as_dict()
-            if isinstance(maybe, dict):
-                d = maybe
-        if not d:
-            dumped = json.dumps(result, default=lambda o: getattr(o, "__dict__", str(o)))
-            maybe = json.loads(dumped)
-            if isinstance(maybe, dict):
-                d = maybe
-    except Exception:
-        d = {}
-
-    if isinstance(d, dict):
-        choices = d.get("choices")
-        if isinstance(choices, list) and choices:
-            first = choices[0]
-            if isinstance(first, dict):
-                msg = first.get("message")
-                if isinstance(msg, dict):
-                    raw = str(msg.get("content") or "")
-                else:
-                    raw = str(first.get("content") or "")
-        if not raw:
-            msg = d.get("message")
-            if isinstance(msg, dict):
-                raw = str(msg.get("content") or "")
-
-    return raw or "", "deepseek"
-
-# ------------------------------------------------------------------------------
-# Endpoints
-# ------------------------------------------------------------------------------
-
-@app.get("/api/health")
-def health():
-    return {"ok": True, "time": int(time.time())}
-
-# --- Estimate (DeepSeek or GPT-4.1) ------------------------------------------
-
-@app.post("/api/estimate", response_model=EstimateResponse)
-def api_estimate(payload: EstimateRequest):
-    logger.info("[AI] /api/estimate start engine=%s", payload.engine)
-    t0 = time.time()
-    try:
-        if payload.engine == "deepseek":
-            raw_text, engine_used = call_deepseek(payload)
-        else:
-            raw_text, engine_used = call_gpt41(payload)
-        parsed = extract_first_json(raw_text)
-        out = EstimateResponse(
-            id=str(uuid.uuid4()),
-            engine=engine_used,
-            raw_text=raw_text,
-            json=parsed,
-        )
-        logger.info("[AI] /api/estimate done in %.2fs", time.time() - t0)
-        return out
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("[AI] /api/estimate failed")
-        raise HTTPException(status_code=502, detail=f"AI estimate failed: {e}")
-
-# --- Org Chart Parser ---------------------------------------------------------
-
-def _parse_org_text_lines(text: str) -> List[OrgPerson]:
-    people: List[OrgPerson] = []
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        if "," in line:
-            parts = [p.strip() for p in line.split(",")]
-            name = parts[0] if parts else ""
-            title = parts[1] if len(parts) > 1 else ""
-            manager = parts[2] if len(parts) > 2 else None
-            if name:
-                people.append(OrgPerson(name=name, title=title, manager=manager))
-            continue
-        m = re.match(
-            r"^(?P<name>[^-]+?)(?:\s*-\s*(?P<title>.*?))?(?:\s*\(manager:\s*(?P<mgr>.+?)\s*\))?$",
-            line, flags=re.IGNORECASE
-        )
-        if m:
-            name = m.group("name").strip()
-            title = (m.group("title") or "").strip()
-            manager = (m.group("mgr") or "").strip() or None
-            if name:
-                people.append(OrgPerson(name=name, title=title, manager=manager))
-            continue
-        people.append(OrgPerson(name=line))
-    return people
-
-def _parse_org_file(upload: UploadFile) -> List[OrgPerson]:
-    name_l = (upload.filename or "").lower()
-    content = upload.file.read()
-    if name_l.endswith(".csv") or name_l.endswith(".tsv"):
-        dialect = "excel" if name_l.endswith(".csv") else "excel-tab"
-        reader = csv.DictReader(io.StringIO(content.decode("utf-8")), dialect=dialect)
-        out: List[OrgPerson] = []
-        for row in reader:
-            out.append(
-                OrgPerson(
-                    name=(row.get("name") or row.get("Name") or "").strip(),
-                    title=(row.get("title") or row.get("Title") or "").strip(),
-                    manager=(row.get("manager") or row.get("Manager") or None),
-                )
-            )
-        return out
-    # treat as text
-    return _parse_org_text_lines(content.decode("utf-8"))
-
-@app.post("/api/parse-org-chart")
-async def parse_org_chart(
-    request: Request,
-    body: Optional[str] = Form(None),
-    file: Optional[UploadFile] = File(None),
-):
-    try:
-        people: List[OrgPerson] = []
-        if request.headers.get("content-type", "").startswith("application/json"):
-            data = await request.json()
-            try:
-                parsed = OrgChartBody(**data)
-            except ValidationError as ve:
-                raise HTTPException(status_code=422, detail=json.loads(ve.json()))
-            if parsed.people:
-                people = parsed.people
-            elif parsed.text:
-                people = _parse_org_text_lines(parsed.text)
-        else:
-            if file is not None:
-                people = _parse_org_file(file)
-            elif body:
-                people = _parse_org_text_lines(body)
-            else:
-                raise HTTPException(status_code=422, detail="Provide a file or 'body' text.")
-        if not people:
-            raise HTTPException(status_code=422, detail="No people found in input.")
-
-        nodes: Dict[str, Dict[str, Any]] = {}
-        edges: List[Dict[str, str]] = []
-        for p in people:
-            if not p.name:
-                continue
-            nid = p.name
-            if nid not in nodes:
-                nodes[nid] = {"id": nid, "name": p.name, "title": p.title or ""}
-            else:
-                if p.title and not nodes[nid].get("title"):
-                    nodes[nid]["title"] = p.title
-            if p.manager:
-                edges.append({"from": p.manager, "to": p.name})
-        for e in edges:
-            m = e["from"]
-            if m not in nodes:
-                nodes[m] = {"id": m, "name": m, "title": ""}
-
-        return {"ok": True, "count": len(nodes), "nodes": list(nodes.values()), "edges": edges}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("Org chart parsing failed")
-        raise HTTPException(status_code=500, detail=f"Org chart parsing failed: {e}")
-
-# --- Rates from local rates.json ---------------------------------------------
-
-def _load_rates_file() -> Dict[str, Any]:
-    if not os.path.exists(RATES_PATH):
-        raise HTTPException(status_code=404, detail=f"rates.json not found at {RATES_PATH}")
-    try:
-        with open(RATES_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            if not isinstance(data, dict):
-                raise ValueError("rates.json must be an object")
-            return data
-    except Exception as e:
-        logger.exception("Failed reading rates.json")
-        raise HTTPException(status_code=500, detail=f"Failed to read rates.json: {e}")
-
-def _normalize_boe_rate(data: Dict[str, Any]) -> Optional[float]:
-    for k in ("bank_rate_percent", "bank_rate", "rate", "boe", "boe_rate"):
-        if k in data:
-            v = data[k]
-            try:
-                return float(v)
-            except Exception:
-                pass
-    for v in data.values():
-        if isinstance(v, str):
-            m = re.search(r"(\d+(?:\.\d+)?)\s*%", v)
-            if m:
-                try:
-                    return float(m.group(1))
-                except Exception:
-                    pass
-    return None
-
-@app.get("/api/rates")
-def api_rates():
-    data = _load_rates_file()
-    norm = _normalize_boe_rate(data)
-    return {
-        "ok": True,
-        "ts": int(time.time()),
-        "data": data,
-        **({"bank_rate_percent": norm} if norm is not None else {}),
+@app.post("/chat")
+def chat():
+    """
+    POST body example:
+    {
+      "message": "Hello",
+      "provider": "azure" | "deepseek_public" | "deepseek_azure",
+      "system": "You are helpful.",
+      "temperature": 0.2,
+      "response_format": "json_object" | "text",
+      "stream": false
     }
-
-# --- Agents (Azure AI Projects) ----------------------------------------------
-
-@app.get("/api/agent/health")
-def agent_health():
-    try:
-        client = get_project_client()
-        agent = client.agents.get_agent(AZURE_AGENT_ID)
-        return {"ok": True, "agent_id": getattr(agent, "id", None) or getattr(agent, "agent_id", None)}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("Agent health failed")
-        raise HTTPException(status_code=500, detail=f"Agent health failed: {e}")
-
-class AgentChatResponse(BaseModel):
-    ok: bool
-    session_id: str
-    replies: List[str]
-    raw: Any
-
-@app.post("/api/agent/chat", response_model=AgentChatResponse)
-def agent_chat(body: AgentChatRequest):
-    """
-    Non-streaming agent chat:
-      - Creates a session if none provided
-      - Sends user message
-      - Fetches assistant responses
     """
     try:
-        client = get_project_client()
+        body = request.get_json(force=True) or {}
+        user_msg: str = body.get("message", "")
+        if not user_msg:
+            return err_json("Field 'message' is required.", 400)
 
-        _ = client.agents.get_agent(AZURE_AGENT_ID)
+        provider: str = body.get("provider", "azure")
+        system_msg: str = body.get("system", "You are a helpful assistant.")
+        temperature: float = float(body.get("temperature", 0.2))
+        response_format_opt = body.get("response_format", "text")
+        stream: bool = bool(body.get("stream", False))
 
-        session_id = body.session_id
-        if not session_id:
-            session = client.agents.create_session(AZURE_AGENT_ID)
-            session_id = getattr(session, "id", None) or getattr(session, "session_id", None) or session["id"]
+        kind, client, model_name = choose_client(provider)
 
-        client.agents.send_message(
-            session_id=session_id,
-            role="user",
-            content=body.message,
-            temperature=body.temperature,
-            max_output_tokens=body.max_output_tokens,
-        )
+        messages: List[Dict[str, str]] = [
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_msg},
+        ]
 
-        resp = client.agents.get_responses(session_id=session_id, stream=False)
+        kwargs: Dict[str, Any] = {
+            "model": model_name,
+            "messages": messages,  # SDK accepts list[dict] {role, content}
+            "temperature": temperature,
+        }
 
-        replies: List[str] = []
-        out = getattr(resp, "output", None) or getattr(resp, "choices", None)
-        if isinstance(out, list):
-            for item in out:
-                msg = getattr(item, "message", None)
-                if msg and getattr(msg, "content", None):
-                    replies.append(msg.content)
-                    continue
-                if isinstance(item, dict):
-                    text = (item.get("message") or {}).get("content") or item.get("content")
-                    if text:
-                        replies.append(text)
-        if not replies:
+        if response_format_opt == "json_object":
+            # OpenAI/Azure support: response_format={"type": "json_object"}
+            # (For Azure, this is passed through to the underlying model.)
+            kwargs["response_format"] = {"type": "json_object"}
+
+        if stream:
+            # Simple server-side stream aggregation (kept minimal intentionally)
+            # If you want true SSE, expose as text/event-stream.
+            resp = client.chat.completions.create(stream=True, **kwargs)
+            parts: List[str] = []
+            for ev in resp:
+                if hasattr(ev, "choices") and ev.choices:
+                    delta = getattr(ev.choices[0], "delta", None)
+                    if delta and getattr(delta, "content", None):
+                        parts.append(delta.content)
+            content = "".join(parts)
+        else:
+            resp = client.chat.completions.create(**kwargs)
+            content = resp.choices[0].message.content if resp and resp.choices else ""
+
+        result: Dict[str, Any] = {"reply": content}
+
+        # If caller wanted JSON and the model actually returned JSON, extract safely
+        if response_format_opt == "json_object":
             try:
-                if hasattr(resp, "as_dict"):
-                    replies.append(json.dumps(resp.as_dict()))
-                else:
-                    replies.append(json.dumps(json.loads(json.dumps(resp, default=lambda o: getattr(o, "__dict__", str(o))))))
+                result["json"] = extract_first_json(content)
             except Exception:
-                replies.append(str(resp))
+                # Return raw text plus a note; don't 500 for parse misses
+                result["json_error"] = "Could not parse JSON from model output."
 
-        return AgentChatResponse(ok=True, session_id=session_id, replies=replies, raw=_safe_to_dict(resp))
-    except HTTPException:
-        raise
+        return ok_json(result, 200)
+
+    except KeyError as e:
+        return err_json(f"Missing required env var: {e}", 500)
+    except ValueError as e:
+        # For things like bad provider, parse errors we bubbled intentionally
+        return err_json(str(e), 400)
     except Exception as e:
-        logger.exception("Agent chat failed")
-        raise HTTPException(status_code=500, detail=f"Agent chat failed: {e}")
+        return err_json(str(e), 500)
 
-def _safe_to_dict(obj: Any) -> Any:
+
+# ------------------------------------------------------------------------------
+# /structured endpoint (force JSON contract from a free-form model output)
+# ------------------------------------------------------------------------------
+@app.post("/structured")
+def structured():
+    """
+    Accepts raw model output in body and extracts the first JSON object.
+
+    Body:
+    {
+      "text": "<model output that may contain JSON>"
+    }
+    """
     try:
-        if hasattr(obj, "as_dict"):
-            return obj.as_dict()
-        if isinstance(obj, dict):
-            return obj
-        return json.loads(json.dumps(obj, default=lambda o: getattr(o, "__dict__", str(o))))
-    except Exception:
-        return str(obj)
+        body = request.get_json(force=True) or {}
+        text = body.get("text", "")
+        if not text:
+            return err_json("Field 'text' is required.", 400)
+        obj = extract_first_json(text)
+        return ok_json({"json": obj}, 200)
+    except ValueError as e:
+        return err_json(str(e), 422)
+    except Exception as e:
+        return err_json(str(e), 500)
+
 
 # ------------------------------------------------------------------------------
-# Error handlers
-# ------------------------------------------------------------------------------
-
-@app.exception_handler(HTTPException)
-async def http_exception_handler(_: Request, exc: HTTPException):
-    return JSONResponse(status_code=exc.status_code, content={"ok": False, "error": exc.detail})
-
-@app.exception_handler(Exception)
-async def unhandled_exception_handler(_: Request, exc: Exception):
-    logger.exception("Unhandled exception")
-    return JSONResponse(status_code=500, content={"ok": False, "error": "Internal server error."})
-
-# ------------------------------------------------------------------------------
-# Entrypoint
+# Main (for local dev). In Azure, use Gunicorn: `gunicorn --bind=0.0.0.0 --timeout 600 app:app`
 # ------------------------------------------------------------------------------
 if __name__ == "__main__":
-    host = os.getenv("HOST", "0.0.0.0")
-    port = int(os.getenv("PORT", "8000"))
-    reload = os.getenv("RELOAD", "0") == "1"
-    uvicorn.run("app:app", host=host, port=port, reload=reload)
+    # Local convenience; Azure App Service will ignore this and run with gunicorn.
+    port = int(os.environ.get("PORT", "8000"))
+    app.run(host="0.0.0.0", port=port)
