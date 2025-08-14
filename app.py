@@ -62,7 +62,33 @@ app.add_middleware(
 # Utilities: robust JSON extraction
 # ------------------------------------------------------------------------------
 
-JSON_BLOCK_PATTERN = re.compile(r"(?P<json>\{(?:[^{}]|(?R))*\})", re.DOTALL)
+def extract_first_json_block(s: str) -> str | None:
+    start = s.find("{")
+    if start == -1:
+        return None
+
+    depth = 0
+    in_str = False
+    esc = False
+
+    for i, ch in enumerate(s[start:], start):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        else:
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return s[start : i + 1]
+    return None
 
 def _balanced_braces(s: str) -> bool:
     stack = 0
@@ -94,15 +120,18 @@ def _try_load_json(s: str) -> Optional[dict]:
         return None
 
 def extract_first_json(text: str) -> dict:
+    """Try to extract and parse the first JSON object from text, repairing if needed."""
     obj = _try_load_json(text)
     if obj is not None:
         return obj
-    for m in JSON_BLOCK_PATTERN.finditer(text):
-        block = m.group("json")
+
+    block = extract_first_json_block(text)
+    if block:
         if _balanced_braces(block):
             obj = _try_load_json(block)
             if obj is not None:
                 return obj
+
         opens = block.count("{")
         closes = block.count("}")
         if opens > closes:
@@ -111,10 +140,12 @@ def extract_first_json(text: str) -> dict:
                 obj = _try_load_json(repaired)
                 if obj is not None:
                     return obj
+
     stripped = re.sub(r",\s*([\}\]])", r"\1", text)
     obj = _try_load_json(stripped)
     if obj is not None:
         return obj
+
     logger.error("Failed to decode extracted JSON from model output.")
     raise HTTPException(status_code=502, detail="Model did not return valid JSON.")
 
