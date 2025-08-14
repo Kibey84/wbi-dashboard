@@ -1,488 +1,484 @@
 import os
+import pandas as pd
+from datetime import datetime
+from flask import Flask, render_template, jsonify, request, send_from_directory, send_file
 import io
-import re
-import csv
 import json
-import time
-import uuid
+import asyncio
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+import threading
+import uuid
+import re
+from xlsxwriter.workbook import Workbook
+from typing import cast, Optional, Dict
+from fpdf import FPDF
 
-import uvicorn
-from fastapi import FastAPI, Body, UploadFile, File, Form, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, ValidationError, model_validator
-from dotenv import load_dotenv
+from tools import org_chart_parser
+from tools import wbiops
 
-# Azure auth & SDKs
-from azure.identity import DefaultAzureCredential, get_bearer_token_provider
-from openai import AzureOpenAI 
-from azure.ai.inference import ChatCompletionsClient  
-from azure.ai.inference.models import SystemMessage, UserMessage
-# ------------------------------------------------------------------------------
-# Environment & Logging
-# ------------------------------------------------------------------------------
-load_dotenv()
+from azure.storage.blob import BlobServiceClient
+from openai import AsyncAzureOpenAI
+# Import the specific type for response_format
+from openai.types.chat import ChatCompletionMessageParam, ChatCompletionToolParam, ChatCompletionMessage
 
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(
-    level=LOG_LEVEL,
-    format="%(asctime)s %(levelname)s:%(name)s:%(lineno)d %(message)s",
-)
-logger = logging.getLogger("wbi-app")
+# --- Configuration for AI Models ---
+# For GPT-4 (used for planning, validation, and summaries)
+AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
+AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY")
+AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT")
 
-CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()]
+# For DeepSeek (used for the main BoE estimation task)
+DEEPSEEK_ENDPOINT = os.getenv("DEEPSEEK_AZURE_ENDPOINT")
+DEEPSEEK_KEY = os.getenv("DEEPSEEK_AZURE_KEY")
+DEEPSEEK_DEPLOYMENT = "WBI-Dash-DeepSeek"
 
-GPT41_ENDPOINT = os.getenv("GPT41_ENDPOINT", "").strip()
-GPT41_DEPLOYMENT = os.getenv("GPT41_DEPLOYMENT", "").strip()
 
-DEEPSEEK_ENDPOINT = os.getenv("ENDPOINT", "").strip()
-DEEPSEEK_DEPLOYMENT = os.getenv("MODEL_NAME", "").strip()
+print("Flask App Loaded. ENV:", os.environ.get("AZURE_STORAGE_CONNECTION_STRING"))
 
-AZURE_PROJECT_CONNECTION_STRING = os.getenv("AZURE_PROJECT_CONNECTION_STRING", "").strip()
-AZURE_AGENT_ID = os.getenv("AZURE_AGENT_ID", "").strip()
+basedir = os.path.abspath(os.path.dirname(__file__))
+app = Flask(__name__,
+            template_folder=os.path.join(basedir, 'templates'),
+            static_folder=os.path.join(basedir, 'static'))
 
-RATES_PATH = os.getenv("RATES_PATH", "./rates.json").strip()
+REPORTS_DIR = os.path.join(os.getcwd(), "generated_reports")
+os.makedirs(REPORTS_DIR, exist_ok=True)
 
-# ------------------------------------------------------------------------------
-# FastAPI app
-# ------------------------------------------------------------------------------
-app = FastAPI(title="WBI Dashboard API", version="1.1.1")
+BLOB_CONTAINER_NAME = "data"
+PROJECT_DATA_FILE = 'MockReportToolFile.xlsx'
+UPDATES_FILE = 'updates.csv'
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=CORS_ORIGINS or ["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+if not logging.getLogger().hasHandlers():
+    logging.basicConfig(level=logging.INFO)
 
-# ------------------------------------------------------------------------------
-# Utilities: robust JSON extraction (FIXED)
-# ------------------------------------------------------------------------------
-def extract_first_json(text: str) -> dict:
+pipeline_jobs = {}
+
+# ==============================================================================
+# --- CORE APPLICATION LOGIC & HELPER FUNCTIONS ---
+# ==============================================================================
+
+def run_pipeline_logic(job_id):
     """
-    Robustly extracts the first JSON object from a string using a simple regex.
+    Runs the WBI pipeline in a background thread and updates the global status with phases.
     """
+    pipeline_jobs[job_id] = {
+        "status": "running",
+        "phase": "initializing",
+        "log": [{"text": "✅ Pipeline Started"}],
+        "opps_report_filename": None,
+        "match_report_filename": None
+    }
+    log = pipeline_jobs[job_id]["log"]
+
+    try:
+        pipeline_jobs[job_id]["phase"] = "scraping opportunities"
+        pipeline_result = wbiops.run_wbi_pipeline(log)
+        
+        if pipeline_result:
+            opps_df, matchmaking_df = pipeline_result
+        else:
+            log.append({"text": "❌ Pipeline did not return valid data."})
+            opps_df, matchmaking_df = pd.DataFrame(), pd.DataFrame()
+
+        pipeline_jobs[job_id]["phase"] = "generating reports"
+        if not opps_df.empty:
+            opps_filename = f"Opportunity_Report_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.xlsx"
+            opps_df.to_excel(os.path.join(REPORTS_DIR, opps_filename), index=False)
+            pipeline_jobs[job_id]["opps_report_filename"] = opps_filename
+            log.append({"text": f"📊 Primary Report Generated: {opps_filename}"})
+
+        if not matchmaking_df.empty:
+            match_filename = f"Strategic_Matchmaking_Report_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.xlsx"
+            matchmaking_df.to_excel(os.path.join(REPORTS_DIR, match_filename), index=False)
+            pipeline_jobs[job_id]["match_report_filename"] = match_filename
+            log.append({"text": f"🤝 Matchmaking Report Generated: {match_filename}"})
+
+        pipeline_jobs[job_id]["phase"] = "completed"
+        log.append({"text": "🎉 Run Complete!"})
+        pipeline_jobs[job_id]["status"] = "completed"
+
+    except Exception as e:
+        logging.error(f"Pipeline job {job_id} failed: {e}", exc_info=True)
+        log.append({"text": f"❌ Critical Error: {e}"})
+        pipeline_jobs[job_id]["status"] = "failed"
+        pipeline_jobs[job_id]["phase"] = "error"
+
+def get_unique_pms():
+    df, error = load_project_data()
+    return sorted(df['pm'].dropna().unique().tolist()) if not error and not df.empty else []
+
+def load_project_data():
+    connect_str = os.getenv('AZURE_STORAGE_CONNECTION_STRING')
+    if not connect_str:
+        logging.error("AZURE_STORAGE_CONNECTION_STRING is missing.")
+        return pd.DataFrame(), "Azure Storage connection string not found."
+    try:
+        blob_service_client = BlobServiceClient.from_connection_string(connect_str)
+        blob_client = blob_service_client.get_blob_client(BLOB_CONTAINER_NAME, PROJECT_DATA_FILE)
+        with io.BytesIO() as stream:
+            blob_client.download_blob().readinto(stream)
+            stream.seek(0)
+            df = pd.read_excel(stream)
+        column_mapping = {
+            'project_id': 'projectName', 'project_pia': 'pi', 'project_owner': 'pm',
+            'project_date_started': 'startDate', 'project_date_completed': 'endDate',
+            'Status': 'status', 'project_description': 'description'
+        }
+        missing_cols = [col for col in column_mapping if col not in df.columns]
+        if missing_cols:
+            return pd.DataFrame(), f"Missing columns: {missing_cols}"
+        df_filtered = df[list(column_mapping)].rename(columns=column_mapping)
+        df_filtered['startDate'] = pd.to_datetime(df_filtered['startDate'], errors='coerce').dt.strftime('%Y-%m-%d')
+        df_filtered['endDate'] = pd.to_datetime(df_filtered['endDate'], errors='coerce').dt.strftime('%Y-%m-%d')
+        df_filtered.fillna('', inplace=True)
+        return df_filtered, None
+    except Exception as e:
+        return pd.DataFrame(), str(e)
+
+def _extract_json_from_response(text: str) -> Optional[Dict]:
+    """Robustly extracts a JSON object from a string, even with surrounding text."""
     match = re.search(r'\{.*\}', text, re.DOTALL)
     if match:
         try:
             return json.loads(match.group(0))
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to decode extracted JSON: {e}. Content: {match.group(0)}")
-            raise HTTPException(status_code=502, detail="Model returned a malformed JSON object.")
-    
-    logger.error(f"No valid JSON object found in AI response: {text}")
-    raise HTTPException(status_code=502, detail="Model did not return a valid JSON object.")
-
-
-# ------------------------------------------------------------------------------
-# Azure clients (two distinct stacks)
-# ------------------------------------------------------------------------------
-
-_token_provider = get_bearer_token_provider(
-    DefaultAzureCredential(), "https://cognitiveservices.azure.com/.default"
-)
-
-def get_gpt41_client() -> AzureOpenAI:
-    if not GPT41_ENDPOINT or not GPT41_DEPLOYMENT:
-        raise HTTPException(status_code=500, detail="GPT-4.1 config missing (GPT41_ENDPOINT / GPT41_DEPLOYMENT).")
-    return AzureOpenAI(
-        azure_endpoint=GPT41_ENDPOINT,
-        azure_ad_token_provider=_token_provider,
-        api_version="2025-01-01-preview",
-        timeout=25,
-    )
-
-def get_deepseek_client() -> ChatCompletionsClient:
-    if not DEEPSEEK_ENDPOINT or not DEEPSEEK_DEPLOYMENT:
-        raise HTTPException(status_code=500, detail="DeepSeek config missing (ENDPOINT / MODEL_NAME).")
-    return ChatCompletionsClient(
-        endpoint=DEEPSEEK_ENDPOINT,
-        credential=DefaultAzureCredential(),
-        credential_scopes=["https://cognitiveservices.azure.com/.default"],
-    )
-
-def get_project_client():
-    if not AZURE_PROJECT_CONNECTION_STRING or not AZURE_AGENT_ID:
-        raise HTTPException(status_code=500, detail="Agents config missing (AZURE_PROJECT_CONNECTION_STRING / AZURE_AGENT_ID).")
-    try:
-        from azure.ai.projects import AIProjectClient  # type: ignore
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"azure.ai.projects not available: {e}")
-    # FIX: Add 'type: ignore' to suppress the Pylance error
-    return AIProjectClient.from_connection_string( # type: ignore
-        credential=DefaultAzureCredential(),
-        conn_str=AZURE_PROJECT_CONNECTION_STRING
-    )
-
-# ------------------------------------------------------------------------------
-# Models
-# ------------------------------------------------------------------------------
-
-class EstimateRequest(BaseModel):
-    prompt: str
-    engine: str = Field(default="gpt41", description='Use "gpt41" or "deepseek"')
-    system_prompt: Optional[str] = "You are a careful analyst. Return only valid JSON."
-    temperature: float = Field(default=0.2, ge=0.0, le=2.0)
-    max_tokens: int = Field(default=800, ge=32, le=4096)
-
-    @model_validator(mode="after")
-    def _normalize(self) -> "EstimateRequest":
-        e = (self.engine or "gpt41").lower().strip()
-        if e not in ("gpt41", "deepseek"):
-            raise ValueError("engine must be 'gpt41' or 'deepseek'")
-        self.engine = e
-        return self
-
-class EstimateResponse(BaseModel):
-    id: str
-    engine: str
-    raw_text: str
-    json: Dict[str, Any]
-
-class OrgPerson(BaseModel):
-    name: str
-    title: Optional[str] = ""
-    manager: Optional[str] = None
-
-class OrgChartBody(BaseModel):
-    text: Optional[str] = None
-    people: Optional[List[OrgPerson]] = None
-
-    @model_validator(mode="after")
-    def _must_have_input(self) -> "OrgChartBody":
-        if not self.text and not self.people:
-            raise ValueError("Provide 'text' or 'people'.")
-        return self
-
-class AgentChatRequest(BaseModel):
-    message: str
-    session_id: Optional[str] = None
-    temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0)
-    max_output_tokens: Optional[int] = Field(default=None, ge=32, le=4096)
-
-# ------------------------------------------------------------------------------
-# AI calls
-# ------------------------------------------------------------------------------
-
-def call_gpt41(req: EstimateRequest) -> Tuple[str, str]:
-    client = get_gpt41_client()
-    logger.info("[AI gpt41] chat.completions.create …")
-    resp = client.chat.completions.create(
-        model=GPT41_DEPLOYMENT,
-        messages=[
-            {"role": "system", "content": req.system_prompt or "Return valid JSON."},
-            {"role": "user", "content": req.prompt},
-        ],
-        max_tokens=req.max_tokens,
-        temperature=req.temperature,
-    )
-    raw = resp.choices[0].message.content or ""
-    return raw, "gpt41"
-
-def call_deepseek(req: EstimateRequest) -> Tuple[str, str]:
-    client = get_deepseek_client()
-    logger.info("[AI deepseek] complete …")
-    result = client.complete(
-        model=DEEPSEEK_DEPLOYMENT,
-        messages=[
-            SystemMessage(content=req.system_prompt or "Return valid JSON."),
-            UserMessage(content=req.prompt),
-        ],
-        temperature=req.temperature,
-        max_tokens=req.max_tokens,
-        stream=False,
-    )
-    raw = result.choices[0].message.content or ""
-    return raw, "deepseek"
-
-# ------------------------------------------------------------------------------
-# Endpoints
-# ------------------------------------------------------------------------------
-
-@app.get("/api/health")
-def health():
-    return {"ok": True, "time": int(time.time())}
-
-# --- Estimate (DeepSeek or GPT-4.1) ------------------------------------------
-
-@app.post("/api/estimate", response_model=EstimateResponse)
-def api_estimate(payload: EstimateRequest):
-    logger.info("[AI] /api/estimate start engine=%s", payload.engine)
-    t0 = time.time()
-    try:
-        if payload.engine == "deepseek":
-            raw_text, engine_used = call_deepseek(payload)
-        else:
-            raw_text, engine_used = call_gpt41(payload)
-        parsed = extract_first_json(raw_text)
-        out = EstimateResponse(
-            id=str(uuid.uuid4()),
-            engine=engine_used,
-            raw_text=raw_text,
-            json=parsed,
-        )
-        logger.info("[AI] /api/estimate done in %.2fs", time.time() - t0)
-        return out
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("[AI] /api/estimate failed")
-        raise HTTPException(status_code=502, detail=f"AI estimate failed: {e}")
-
-# --- Org Chart Parser ---------------------------------------------------------
-# ... (rest of your functions remain the same) ...
-
-def _parse_org_text_lines(text: str) -> List[OrgPerson]:
-    people: List[OrgPerson] = []
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        if "," in line:
-            parts = [p.strip() for p in line.split(",")]
-            name = parts[0] if parts else ""
-            title = parts[1] if len(parts) > 1 else ""
-            manager = parts[2] if len(parts) > 2 else None
-            if name:
-                people.append(OrgPerson(name=name, title=title, manager=manager))
-            continue
-        m = re.match(
-            r"^(?P<name>[^-]+?)(?:\s*-\s*(?P<title>.*?))?(?:\s*\(manager:\s*(?P<mgr>.+?)\s*\))?$",
-            line, flags=re.IGNORECASE
-        )
-        if m:
-            name = m.group("name").strip()
-            title = (m.group("title") or "").strip()
-            manager = (m.group("mgr") or "").strip() or None
-            if name:
-                people.append(OrgPerson(name=name, title=title, manager=manager))
-            continue
-        people.append(OrgPerson(name=line))
-    return people
-
-def _parse_org_file(upload: UploadFile) -> List[OrgPerson]:
-    name_l = (upload.filename or "").lower()
-    content = upload.file.read()
-    if name_l.endswith(".csv") or name_l.endswith(".tsv"):
-        dialect = "excel" if name_l.endswith(".csv") else "excel-tab"
-        reader = csv.DictReader(io.StringIO(content.decode("utf-8")), dialect=dialect)
-        out: List[OrgPerson] = []
-        for row in reader:
-            out.append(
-                OrgPerson(
-                    name=(row.get("name") or row.get("Name") or "").strip(),
-                    title=(row.get("title") or row.get("Title") or "").strip(),
-                    manager=(row.get("manager") or row.get("Manager") or None),
-                )
-            )
-        return out
-    # treat as text
-    return _parse_org_text_lines(content.decode("utf-8"))
-
-@app.post("/api/parse-org-chart")
-async def parse_org_chart(
-    request: Request,
-    body: Optional[str] = Form(None),
-    file: Optional[UploadFile] = File(None),
-):
-    try:
-        people: List[OrgPerson] = []
-        if request.headers.get("content-type", "").startswith("application/json"):
-            data = await request.json()
-            try:
-                parsed = OrgChartBody(**data)
-            except ValidationError as ve:
-                raise HTTPException(status_code=422, detail=json.loads(ve.json()))
-            if parsed.people:
-                people = parsed.people
-            elif parsed.text:
-                people = _parse_org_text_lines(parsed.text)
-        else:
-            if file is not None:
-                people = _parse_org_file(file)
-            elif body:
-                people = _parse_org_text_lines(body)
-            else:
-                raise HTTPException(status_code=422, detail="Provide a file or 'body' text.")
-        if not people:
-            raise HTTPException(status_code=422, detail="No people found in input.")
-
-        nodes: Dict[str, Dict[str, Any]] = {}
-        edges: List[Dict[str, str]] = []
-        for p in people:
-            if not p.name:
-                continue
-            nid = p.name
-            if nid not in nodes:
-                nodes[nid] = {"id": nid, "name": p.name, "title": p.title or ""}
-            else:
-                if p.title and not nodes[nid].get("title"):
-                    nodes[nid]["title"] = p.title
-            if p.manager:
-                edges.append({"from": p.manager, "to": p.name})
-        for e in edges:
-            m = e["from"]
-            if m not in nodes:
-                nodes[m] = {"id": m, "name": m, "title": ""}
-
-        return {"ok": True, "count": len(nodes), "nodes": list(nodes.values()), "edges": edges}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("Org chart parsing failed")
-        raise HTTPException(status_code=500, detail=f"Org chart parsing failed: {e}")
-
-# --- Rates from local rates.json ---------------------------------------------
-
-def _load_rates_file() -> Dict[str, Any]:
-    if not os.path.exists(RATES_PATH):
-        raise HTTPException(status_code=404, detail=f"rates.json not found at {RATES_PATH}")
-    try:
-        with open(RATES_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            if not isinstance(data, dict):
-                raise ValueError("rates.json must be an object")
-            return data
-    except Exception as e:
-        logger.exception("Failed reading rates.json")
-        raise HTTPException(status_code=500, detail=f"Failed to read rates.json: {e}")
-
-def _normalize_boe_rate(data: Dict[str, Any]) -> Optional[float]:
-    for k in ("bank_rate_percent", "bank_rate", "rate", "boe", "boe_rate"):
-        if k in data:
-            v = data[k]
-            try:
-                return float(v)
-            except Exception:
-                pass
-    for v in data.values():
-        if isinstance(v, str):
-            m = re.search(r"(\d+(?:\.\d+)?)\s*%", v)
-            if m:
-                try:
-                    return float(m.group(1))
-                except Exception:
-                    pass
+        except json.JSONDecodeError:
+            logging.error(f"Failed to decode extracted JSON: {match.group(0)}")
+            return None
+    logging.error(f"No valid JSON object found in response: {text}")
     return None
 
-@app.get("/api/rates")
-def api_rates():
-    data = _load_rates_file()
-    norm = _normalize_boe_rate(data)
-    return {
-        "ok": True,
-        "ts": int(time.time()),
-        "data": data,
-        **({"bank_rate_percent": norm} if norm is not None else {}),
-    }
+# ==============================================================================
+# --- ASYNCHRONOUS AI HELPER FUNCTIONS ---
+# ==============================================================================
 
-# --- Agents (Azure AI Projects) ----------------------------------------------
-
-@app.get("/api/agent/health")
-def agent_health():
+async def _call_ai_agent(client: AsyncAzureOpenAI, model_deployment: str, system_prompt: str, user_prompt: str, is_json: bool = False) -> str:
+    """A generic, reusable function to call an AI agent."""
     try:
-        client = get_project_client()
-        agent = client.agents.get_agent(AZURE_AGENT_ID)
-        return {"ok": True, "agent_id": getattr(agent, "id", None) or getattr(agent, "agent_id", None)}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("Agent health failed")
-        raise HTTPException(status_code=500, detail=f"Agent health failed: {e}")
-
-class AgentChatResponse(BaseModel):
-    ok: bool
-    session_id: str
-    replies: List[str]
-    raw: Any
-
-@app.post("/api/agent/chat", response_model=AgentChatResponse)
-def agent_chat(body: AgentChatRequest):
-    """
-    Non-streaming agent chat:
-      - Creates a session if none provided
-      - Sends user message
-      - Fetches assistant responses
-    """
-    try:
-        client = get_project_client()
-
-        _ = client.agents.get_agent(AZURE_AGENT_ID)
-
-        session_id = body.session_id
-        if not session_id:
-            session = client.agents.create_session(AZURE_AGENT_ID)
-            session_id = getattr(session, "id", None) or getattr(session, "session_id", None) or session["id"]
-
-        client.agents.send_message(
-            session_id=session_id,
-            role="user",
-            content=body.message,
-            temperature=body.temperature,
-            max_output_tokens=body.max_output_tokens,
+        response_format = {"type": "json_object"} if is_json else {"type": "text"}
+        response = await client.chat.completions.create(
+            model=model_deployment,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.1,
+            max_tokens=4096,
+            response_format=response_format # type: ignore
         )
-
-        resp = client.agents.get_responses(session_id=session_id, stream=False)
-
-        replies: List[str] = []
-        out = getattr(resp, "output", None) or getattr(resp, "choices", None)
-        if isinstance(out, list):
-            for item in out:
-                msg = getattr(item, "message", None)
-                if msg and getattr(msg, "content", None):
-                    replies.append(msg.content)
-                    continue
-                if isinstance(item, dict):
-                    text = (item.get("message") or {}).get("content") or item.get("content")
-                    if text:
-                        replies.append(text)
-        if not replies:
-            try:
-                if hasattr(resp, "as_dict"):
-                    replies.append(json.dumps(resp.as_dict()))
-                else:
-                    replies.append(json.dumps(json.loads(json.dumps(resp, default=lambda o: getattr(o, "__dict__", str(o))))))
-            except Exception:
-                replies.append(str(resp))
-
-        return AgentChatResponse(ok=True, session_id=session_id, replies=replies, raw=_safe_to_dict(resp))
-    except HTTPException:
-        raise
+        content = response.choices[0].message.content
+        if not content:
+            raise ValueError("AI returned an empty response.")
+        return content
     except Exception as e:
-        logger.exception("Agent chat failed")
-        raise HTTPException(status_code=500, detail=f"Agent chat failed: {e}")
+        logging.error(f"Error calling AI agent with model {model_deployment}: {e}", exc_info=True)
+        raise
 
-def _safe_to_dict(obj: Any) -> Any:
+async def get_improved_ai_summary(description, update):
+    """Asynchronously gets an improved summary for a project update."""
+    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+    key = os.getenv("AZURE_OPENAI_KEY")
+    deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+
+    if not all([endpoint, key, deployment_name]) or not update:
+        logging.error("Azure OpenAI environment variables missing or no update provided.")
+        return "Azure OpenAI not configured or no update provided."
+    
+    system_prompt = "You are an expert Project Manager... (rest of your prompt)"
+    user_prompt = f"**Project Description:**\n{description}\n\n**Brief Update:**\n{update}\n\n**Rewritten Update:**"
+    
+    client = None
     try:
-        if hasattr(obj, "as_dict"):
-            return obj.as_dict()
-        if isinstance(obj, dict):
-            return obj
-        return json.loads(json.dumps(obj, default=lambda o: getattr(o, "__dict__", str(o))))
-    except Exception:
-        return str(obj)
+        assert endpoint is not None
+        assert key is not None
+        assert deployment_name is not None
+        client = AsyncAzureOpenAI(azure_endpoint=endpoint, api_key=key, api_version="2024-02-01")
+        return await _call_ai_agent(client, deployment_name, system_prompt, user_prompt)
+    finally:
+        if client:
+            await client.close()
 
-# ------------------------------------------------------------------------------
-# Error handlers
-# ------------------------------------------------------------------------------
+# ==============================================================================
+# --- FLASK API ROUTES ---
+# ==============================================================================
 
-@app.exception_handler(HTTPException)
-async def http_exception_handler(_: Request, exc: HTTPException):
-    return JSONResponse(status_code=exc.status_code, content={"ok": False, "error": exc.detail})
+@app.route("/")
+def index():
+    return render_template('index.html')
 
-@app.exception_handler(Exception)
-async def unhandled_exception_handler(_: Request, exc: Exception):
-    logger.exception("Unhandled exception")
-    return JSONResponse(status_code=500, content={"ok": False, "error": "Internal server error."})
+@app.route("/status")
+def status():
+    return "App is running"
 
-# ------------------------------------------------------------------------------
-# Entrypoint
-# ------------------------------------------------------------------------------
-if __name__ == "__main__":
-    host = os.getenv("HOST", "0.0.0.0")
-    port = int(os.getenv("PORT", "8000"))
-    reload = os.getenv("RELOAD", "0") == "1"
-    uvicorn.run("app:app", host=host, port=port, reload=reload)
+@app.route('/api/run-pipeline', methods=['POST'])
+def api_run_pipeline():
+    job_id = str(uuid.uuid4())
+    thread = threading.Thread(target=run_pipeline_logic, args=(job_id,))
+    thread.start()
+    return jsonify({"job_id": job_id})
+
+@app.route('/api/pipeline-status/<job_id>', methods=['GET'])
+def get_pipeline_status(job_id):
+    job = pipeline_jobs.get(job_id)
+    if job is None:
+        return jsonify({"status": "not_found"}), 404
+    return jsonify(job)
+
+@app.route('/api/parse-org-chart', methods=['POST'])
+def api_parse_org_chart():
+    if 'file' not in request.files or not request.files['file'].filename:
+        return jsonify({"error": "No file provided"}), 400
+    file = request.files['file']
+    try:
+        output_filename = org_chart_parser.process_uploaded_pdf(file, REPORTS_DIR)
+        return jsonify({"success": True, "filename": output_filename}) if output_filename else jsonify({"error": "Processing failed"}), 500
+    except Exception as e:
+        logging.error(f"Org chart parsing failed: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error. Check logs for details."}), 500
+
+@app.route('/api/pms')
+def api_get_pms():
+    return jsonify(get_unique_pms())
+
+@app.route('/api/projects')
+def api_get_projects():
+    pm_name = request.args.get('pm')
+    projects_df, error = load_project_data()
+    if error:
+        return jsonify({"error": error}), 500
+    return jsonify(projects_df[projects_df['pm'] == pm_name].to_dict(orient='records')) if pm_name else jsonify([])
+
+@app.route('/api/get_update')
+def api_get_update():
+    project_name = request.args.get('projectName')
+    month = request.args.get('month')
+    year_str = request.args.get('year')
+    if not all([project_name, month, year_str]):
+        return jsonify({})
+    try:
+        year = int(year_str or 0)
+        connect_str = os.getenv('AZURE_STORAGE_CONNECTION_STRING')
+        if not connect_str: return jsonify({})
+        blob_service_client = BlobServiceClient.from_connection_string(connect_str)
+        blob_client = blob_service_client.get_blob_client(BLOB_CONTAINER_NAME, UPDATES_FILE)
+        if not blob_client.exists(): return jsonify({})
+        
+        with io.BytesIO() as stream:
+            blob_client.download_blob().readinto(stream)
+            stream.seek(0)
+            updates_df = pd.read_csv(stream)
+        
+        updates_df['year'] = updates_df['year'].astype(int)
+        update = updates_df[(updates_df['projectName'] == project_name) & (updates_df['month'] == month) & (updates_df['year'] == year)]
+        return jsonify(update.iloc[0].to_dict()) if not update.empty else jsonify({})
+    except Exception as e:
+        logging.error(f"Error retrieving update: {e}")
+        return jsonify({})
+
+@app.route('/api/update_project', methods=['POST'])
+async def api_update_project():
+    data = request.get_json()
+    if not data: return jsonify({"success": False, "error": "Invalid request"}), 400
+    
+    try:
+        ai_summary = await get_improved_ai_summary(data.get('description', ''), data['managerUpdate'])
+        year_val = data.get('year')
+        if year_val is None:
+            return jsonify({"success": False, "error": "Year is a required field."}), 400
+        
+        new_entry = pd.DataFrame([{'projectName': data['projectName'], 'month': data['month'], 'year': int(year_val), 'managerUpdate': data['managerUpdate'], 'aiSummary': ai_summary}])
+        
+        connect_str = os.getenv('AZURE_STORAGE_CONNECTION_STRING')
+        if not connect_str: return jsonify({"success": False, "error": "Storage not configured"}), 500
+        
+        blob_service_client = BlobServiceClient.from_connection_string(connect_str)
+        blob_client = blob_service_client.get_blob_client(BLOB_CONTAINER_NAME, UPDATES_FILE)
+        
+        if blob_client.exists():
+            with io.BytesIO() as stream:
+                blob_client.download_blob().readinto(stream)
+                stream.seek(0)
+                updates_df = pd.read_csv(stream)
+            updates_df['year'] = pd.to_numeric(updates_df['year'], errors='coerce').fillna(0).astype(int)
+            updates_df = updates_df[~((updates_df['projectName'] == data['projectName']) & (updates_df['month'] == data['month']) & (updates_df['year'] == int(year_val)))]
+            final_df = pd.concat([updates_df, new_entry], ignore_index=True)
+        else:
+            final_df = new_entry
+            
+        blob_client.upload_blob(final_df.to_csv(index=False), overwrite=True)
+        return jsonify({"success": True, "aiSummary": ai_summary})
+    except Exception as e:
+        logging.error(f"Update save error: {e}")
+        return jsonify({"success": False, "error": "Failed to save update."}), 500
+
+@app.route('/api/rates', methods=['GET'])
+def get_rates():
+    try:
+        rates_path = os.path.join(basedir, 'tools', 'rates.json')
+        with open(rates_path, 'r') as f:
+            rates_data = json.load(f)
+        return jsonify(rates_data)
+    except Exception as e:
+        logging.error(f"Error loading rates.json: {e}")
+        return jsonify({"error": "Could not load labor rates."}), 500
+
+@app.route('/api/estimate', methods=['POST'])
+async def api_estimate_boe():
+    """Orchestrates a team of AI agents to generate a Basis of Estimate."""
+    if not all([AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_KEY, AZURE_OPENAI_DEPLOYMENT, DEEPSEEK_ENDPOINT, DEEPSEEK_KEY]):
+        return jsonify({"error": "Server configuration error: AI credentials missing."}), 500
+
+    data = request.get_json()
+    if not data: return jsonify({"error": "Invalid request"}), 400
+    
+    new_request = data.get("new_request", "")
+    case_history = data.get("case_history", "")
+    if not new_request: return jsonify({"error": "New request data is missing."}), 400
+
+    gpt4_client, deepseek_client = None, None
+    try:
+        assert AZURE_OPENAI_ENDPOINT is not None
+        assert AZURE_OPENAI_KEY is not None
+        assert AZURE_OPENAI_DEPLOYMENT is not None
+        assert DEEPSEEK_ENDPOINT is not None
+        assert DEEPSEEK_KEY is not None
+        assert DEEPSEEK_DEPLOYMENT is not None
+        
+        gpt4_client = AsyncAzureOpenAI(azure_endpoint=AZURE_OPENAI_ENDPOINT, api_key=AZURE_OPENAI_KEY, api_version="2024-02-01")
+        deepseek_client = AsyncAzureOpenAI(azure_endpoint=DEEPSEEK_ENDPOINT, api_key=DEEPSEEK_KEY, api_version="2024-02-01")
+
+        planner_system_prompt = "You are a strategic planner. Your job is to analyze a user's request and create a high-level, bulleted list of the key sections needed for a comprehensive Basis of Estimate (BOE)."
+        planner_user_prompt = f"Create a high-level plan for a BOE based on this request:\n\n{new_request}"
+        plan = await _call_ai_agent(gpt4_client, AZURE_OPENAI_DEPLOYMENT, planner_system_prompt, planner_user_prompt)
+        logging.info(f"AI Planner Output:\n{plan}")
+
+        estimator_system_prompt = "You are a senior cost estimator. Your job is to take a plan and a new request, analyze them against the provided case history, and generate the detailed line items for the BOE. Provide ONLY a JSON object with keys: 'work_plan', 'materials_and_tools', 'travel', 'subcontracts'."
+        estimator_user_prompt = f"**Case History:**\n{case_history}\n\n**High-Level Plan:**\n{plan}\n\n**New Request:**\n{new_request}\n\n**Your Task:** Generate the detailed JSON data for the work plan, materials, travel, and subcontracts."
+        detailed_estimation_str = await _call_ai_agent(deepseek_client, DEEPSEEK_DEPLOYMENT, estimator_system_prompt, estimator_user_prompt, is_json=True)
+        
+        finalizer_system_prompt = "You are a data formatting specialist. Your only job is to take the provided text and ensure it is a single, perfectly structured JSON object that matches the required final BoE format. Add any missing top-level keys like 'project_title' or 'assumptions' based on the content."
+        finalizer_user_prompt = f"**Original Request:**\n{new_request}\n\n**Detailed Estimation Data:**\n{detailed_estimation_str}\n\n**Your Task:** Combine all information into a single, valid JSON object matching the final BoE structure."
+        final_json_str = await _call_ai_agent(gpt4_client, AZURE_OPENAI_DEPLOYMENT, finalizer_system_prompt, finalizer_user_prompt, is_json=True)
+        
+        final_json = _extract_json_from_response(final_json_str)
+        if not final_json:
+            return jsonify({"error": "The final AI agent failed to produce a valid JSON object."}), 500
+
+        return jsonify(final_json), 200
+
+    except Exception as e:
+        logging.error(f"Error in /api/estimate: {e}", exc_info=True)
+        return jsonify({"error": "An internal server error occurred during AI processing."}), 500
+    finally:
+        if gpt4_client: await gpt4_client.close()
+        if deepseek_client: await deepseek_client.close()
+
+@app.route('/api/generate-boe-excel', methods=['POST'])
+def generate_boe_excel():
+    data = request.json
+    if not data: return jsonify({"error": "Invalid request"}), 400
+    project_data = data.get('projectData'); totals = data.get('totals')
+    if not project_data or not totals: return jsonify({"error": "Missing data"}), 400
+    try:
+        excel_stream = create_formatted_boe_excel(project_data, totals)
+        project_title = project_data.get('project_title', 'BoE_Report').replace(' ', '_')
+        filename = f"BoE_{project_title}_Full.xlsx"
+        return send_file(excel_stream, as_attachment=True, download_name=filename, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    except Exception as e:
+        logging.error(f"Failed to generate BoE Excel file: {e}", exc_info=True)
+        return jsonify({"error": "Failed to generate Excel file."}), 500
+
+@app.route('/api/generate-boe-pdf', methods=['POST'])
+def generate_boe_pdf():
+    data = request.json
+    if not data: return jsonify({"error": "Invalid request"}), 400
+    project_data = data.get('projectData'); totals = data.get('totals')
+    if not project_data or not totals: return jsonify({"error": "Missing data"}), 400
+    try:
+        pdf_stream = create_boe_pdf(project_data, totals)
+        project_title = project_data.get('project_title', 'BoE_Report').replace(' ', '_')
+        filename = f"BoE_{project_title}_Customer.pdf"
+        return send_file(pdf_stream, as_attachment=True, download_name=filename, mimetype='application/pdf')
+    except Exception as e:
+        logging.error(f"Failed to generate BoE PDF file: {e}", exc_info=True)
+        return jsonify({"error": "Failed to generate PDF file."}), 500
+
+def create_formatted_boe_excel(project_data, totals):
+    output_stream = io.BytesIO()
+    with pd.ExcelWriter(output_stream, engine='xlsxwriter') as writer:
+        workbook = cast(Workbook, writer.book)
+        title_format = workbook.add_format({'bold': True, 'font_size': 14, 'align': 'left'})
+        currency_format = workbook.add_format({'num_format': '$#,##0.00'})
+        total_currency_format = workbook.add_format({'num_format': '$#,##0.00', 'bold': True, 'top': 1, 'bottom': 1})
+        
+        summary_df = pd.DataFrame([
+            {"Cost Element": "Direct Labor", "Amount": totals['laborCost']}, {"Cost Element": "Materials & Tools", "Amount": totals['materialsCost']},
+            {"Cost Element": "Travel", "Amount": totals['travelCost']}, {"Cost Element": "Subcontracts", "Amount": totals['subcontractCost']},
+            {"Cost Element": "Total Direct Costs", "Amount": totals['totalDirectCosts']}, {"Cost Element": "Overhead", "Amount": totals['overheadAmount']},
+            {"Cost Element": "Subtotal", "Amount": totals['subtotal']}, {"Cost Element": "G&A", "Amount": totals['gnaAmount']},
+            {"Cost Element": "Total Cost", "Amount": totals['totalCost']}, {"Cost Element": "Fee", "Amount": totals['feeAmount']},
+            {"Cost Element": "Total Proposed Price", "Amount": totals['totalPrice']},
+        ])
+        summary_df.to_excel(writer, sheet_name='Cost Summary', index=False, startrow=3)
+        summary_ws = writer.sheets['Cost Summary']
+        summary_ws.write('A1', f"BoE Summary: {project_data.get('project_title', 'N/A')}", title_format)
+        summary_ws.set_column('A:A', 30); summary_ws.set_column('B:B', 20, currency_format)
+        summary_ws.write('B9', totals['totalDirectCosts'], total_currency_format)
+        summary_ws.write('B13', totals['totalPrice'], total_currency_format)
+        
+        if project_data.get('work_plan'):
+            labor_data = [{'WBS Element': task['task_name'], **task['personnel'][0]} for task in project_data['work_plan']]
+            pd.DataFrame(labor_data).to_excel(writer, sheet_name='Labor Detail', index=False)
+            writer.sheets['Labor Detail'].set_column('A:A', 40)
+
+        for sheet_name, data_key in [('Materials & Tools', 'materials_and_tools'), ('Travel', 'travel'), ('Subcontracts', 'subcontracts')]:
+            if project_data.get(data_key):
+                pd.DataFrame(project_data[data_key]).to_excel(writer, sheet_name=sheet_name, index=False)
+
+    output_stream.seek(0)
+    return output_stream
+
+def create_boe_pdf(project_data, totals):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("helvetica", "B", 20)
+    pdf.cell(0, 10, "Basis of Estimate", ln=True, align="R")
+    pdf.set_font("helvetica", "", 11)
+    pdf.set_font("helvetica", "B", 11)
+    pdf.cell(25, 8, "Project:", border=0)
+    pdf.set_font("helvetica", "", 11)
+    pdf.cell(0, 8, project_data.get('project_title', 'N/A'), ln=True)
+    pdf.set_font("helvetica", "B", 11)
+    pdf.cell(25, 8, "Date:", border=0)
+    pdf.set_font("helvetica", "", 11)
+    pdf.cell(0, 8, datetime.now().strftime('%Y-%m-%d'), ln=True)
+    pdf.ln(10) 
+    
+    table_data = [
+        ("Direct Labor", f"${totals.get('laborCost', 0):,.2f}"), ("Materials & Tools", f"${totals.get('materialsCost', 0):,.2f}"),
+        ("Travel", f"${totals.get('travelCost', 0):,.2f}"), ("Subcontracts", f"${totals.get('subcontractCost', 0):,.2f}"),
+        ("Total Direct Costs", f"${totals.get('totalDirectCosts', 0):,.2f}"),
+        ("Indirect Costs (O/H + G&A)", f"${totals.get('overheadAmount', 0) + totals.get('gnaAmount', 0):,.2f}"),
+        ("Total Estimated Cost", f"${totals.get('totalCost', 0):,.2f}"), ("Fee", f"${totals.get('feeAmount', 0):,.2f}"),
+        ("Total Proposed Price", f"${totals.get('totalPrice', 0):,.2f}")
+    ]
+    
+    line_height = pdf.font_size * 2
+    col_width = pdf.epw / 2  
+    pdf.set_font("helvetica", "B", 11)
+    pdf.cell(col_width, line_height, "Cost Element", border=1)
+    pdf.cell(col_width, line_height, "Amount", border=1, ln=True, align='R')
+    pdf.set_font("helvetica", "", 11)
+
+    for i, (label, value) in enumerate(table_data):
+        if "Total" in label: pdf.set_font("helvetica", "B", 11)
+        pdf.cell(col_width, line_height, label, border=1)
+        pdf.cell(col_width, line_height, value, border=1, ln=True, align='R')
+        pdf.set_font("helvetica", "", 11)
+
+    return io.BytesIO(pdf.output(dest='S'))
+
+@app.route('/download/<path:filename>')
+def download_file(filename):
+    return send_from_directory(REPORTS_DIR, filename, as_attachment=True)
+
+if __name__ == '__main__':
+    app.run(debug=True, port=5001, host='0.0.0.0')
