@@ -98,6 +98,7 @@ if not logging.getLogger().hasHandlers():
 
 logger = logging.getLogger("wbi")
 pipeline_jobs: Dict[str, Dict[str, Any]] = {}
+estimate_jobs: Dict[str, Dict[str, Any]] = {}
 
 # ==============================================================================
 # CORE APP LOGIC
@@ -146,6 +147,65 @@ def run_pipeline_logic(job_id: str) -> None:
         log.append({"text": f"❌ Critical Error: {e}"})
         pipeline_jobs[job_id]["status"] = "failed"
         pipeline_jobs[job_id]["phase"] = "error"
+
+def _run_boe_job(job_id: str, new_request: str, case_history: str) -> None:
+    """Background BoE job: plan -> estimate -> finalize; updates estimate_jobs[job_id]."""
+    estimate_jobs[job_id] = {"status": "running", "log": [], "result": None, "error": None}
+    log = estimate_jobs[job_id]["log"]
+
+    try:
+        # 1) Planner (DeepSeek)
+        log.append({"text": "Planning…"})
+        plan_resp = deepseek_complete([
+            SystemMessage(content="You are a strategic planner. Return a tight bullet list of BOE sections."),
+            UserMessage(content=f"Create a high-level plan for a BOE based on this request:\n\n{new_request}")
+        ], max_tokens=600, request_timeout=40)
+        plan = (plan_resp.choices[0].message.content or "").strip()
+
+        # 2) Estimator (DeepSeek) – ask for JSON explicitly
+        log.append({"text": "Estimating…"})
+        est_resp = deepseek_complete([
+            SystemMessage(content=(
+                "You are a senior cost estimator. Produce ONLY a JSON object with keys: "
+                "'work_plan', 'materials_and_tools', 'travel', 'subcontracts'."
+            )),
+            UserMessage(content=(
+                f"**Case History:**\n{case_history}\n\n"
+                f"**High-Level Plan:**\n{plan}\n\n"
+                f"**New Request:**\n{new_request}\n\n"
+                f"**Your Task:** Generate the detailed JSON."
+            ))
+        ], max_tokens=2500, request_timeout=60)
+        detailed = (est_resp.choices[0].message.content or "").strip()
+
+        # 3) Finalizer (DeepSeek) – force single well-formed object
+        log.append({"text": "Finalizing…"})
+        final_resp = deepseek_complete([
+            SystemMessage(content=(
+                "You are a strict formatter. Output ONE valid JSON object for the final BoE. "
+                "Add top-level keys like 'project_title' and 'assumptions' if implied. "
+                "Output JSON only—no prose."
+            )),
+            UserMessage(content=(
+                f"**Original Request:**\n{new_request}\n\n"
+                f"**Detailed Estimation Data:**\n{detailed}\n\n"
+                f"**Task:** Merge and return one JSON object."
+            ))
+        ], max_tokens=2500, request_timeout=60)
+        final_json_str = (final_resp.choices[0].message.content or "").strip()
+
+        result = _extract_json_from_response(final_json_str)
+        if not result:
+            raise ValueError("Model returned no valid JSON.")
+
+        estimate_jobs[job_id]["result"] = result
+        estimate_jobs[job_id]["status"] = "completed"
+        log.append({"text": "Done."})
+
+    except Exception as e:
+        estimate_jobs[job_id]["status"] = "failed"
+        estimate_jobs[job_id]["error"] = str(e)
+        logger.error("BoE job %s failed: %s", job_id, e, exc_info=True)
 
 def get_unique_pms():
     df, error = load_project_data()
@@ -428,66 +488,28 @@ def get_rates():
         return jsonify({"error": "Could not load labor rates."}), 500
 
 @app.route("/api/estimate", methods=["POST"])
-async def api_estimate_boe():
-    data = request.get_json()
-    if not data:
-        return jsonify({"error": "Invalid request"}), 400
-
-    new_request = data.get("new_request", "")
-    case_history = data.get("case_history", "")
+def api_estimate_start():
+    data = request.get_json() or {}
+    new_request = data.get("new_request", "").strip()
+    case_history = data.get("case_history", "").strip()
     if not new_request:
         return jsonify({"error": "New request data is missing."}), 400
 
-    try:
-        # 1) Planner (DeepSeek)
-        plan_resp = deepseek_complete([
-            SystemMessage(content="You are a strategic planner. Return a tight bullet list of BOE sections."),
-            UserMessage(content=f"Create a high-level plan for a BOE based on this request:\n\n{new_request}")
-        ], max_tokens=800)
-        plan = (plan_resp.choices[0].message.content or "").strip()
+    job_id = str(uuid.uuid4())
+    t = threading.Thread(target=_run_boe_job, args=(job_id, new_request, case_history), daemon=True)
+    t.start()
 
-        # 2) Estimator (DeepSeek) – ask for JSON explicitly
-        est_resp = deepseek_complete([
-            SystemMessage(content=(
-                "You are a senior cost estimator. Produce ONLY a JSON object with keys: "
-                "'work_plan', 'materials_and_tools', 'travel', 'subcontracts'."
-            )),
-            UserMessage(content=(
-                f"**Case History:**\n{case_history}\n\n"
-                f"**High-Level Plan:**\n{plan}\n\n"
-                f"**New Request:**\n{new_request}\n\n"
-                f"**Your Task:** Generate the detailed JSON."
-            ))
-        ], max_tokens=4096)
-        detailed_estimation_str = (est_resp.choices[0].message.content or "").strip()
+    # 202 Accepted with job id so the client can poll
+    return jsonify({"job_id": job_id, "status": "queued"}), 202
 
-        # 3) Finalizer (DeepSeek) – force single well-formed object
-        final_resp = deepseek_complete([
-            SystemMessage(content=(
-                "You are a strict formatter. Output ONE valid JSON object for the final BoE. "
-                "Add top-level keys like 'project_title' and 'assumptions' if implied. "
-                "Output JSON only—no prose."
-            )),
-            UserMessage(content=(
-                f"**Original Request:**\n{new_request}\n\n"
-                f"**Detailed Estimation Data:**\n{detailed_estimation_str}\n\n"
-                f"**Task:** Merge and return one JSON object."
-            ))
-        ], max_tokens=4096)
 
-        final_json_str = (final_resp.choices[0].message.content or "").strip()
-        final_json = _extract_json_from_response(final_json_str)
-        if not final_json:
-            return jsonify({
-                "error": "Model did not return valid JSON.",
-                "raw_sample": final_json_str[:400]
-            }), 502
-
-        return jsonify(final_json), 200
-
-    except Exception as e:
-        logger.error("Error in /api/estimate: %s", e, exc_info=True)
-        return jsonify({"error": f"BoE failed: {e}"}), 500
+@app.route("/api/estimate/<job_id>", methods=["GET"])
+def api_estimate_status(job_id: str):
+    job = estimate_jobs.get(job_id)
+    if not job:
+        return jsonify({"status": "not_found"}), 404
+    # If completed, you get the result in the same payload
+    return jsonify(job), 200
 
 @app.route("/api/selftest/deepseek")
 def selftest_deepseek():

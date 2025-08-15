@@ -762,7 +762,7 @@ async function handleAIEstimate() {
     const case_history = "";
 
     const controller = new AbortController();
-    const timeoutMs = 30000; // 30s
+    const timeoutMs = 120000; // 60s
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
     console.log('[AI] Sending /api/estimate …', { timeoutMs, payloadPreview: new_request.slice(0, 200) + '…' });
