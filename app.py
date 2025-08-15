@@ -9,7 +9,7 @@ import threading
 import uuid
 import re
 from xlsxwriter.workbook import Workbook
-from typing import cast, Optional, Dict, Any
+from typing import cast, Optional, Dict, Any, List, cast as tcast
 import time
 from fpdf import FPDF
 
@@ -23,6 +23,13 @@ from azure.core.exceptions import HttpResponseError, ServiceRequestError
 
 from azure.storage.blob import BlobServiceClient
 from openai import AsyncAzureOpenAI
+from openai import OpenAI
+
+from openai.types.chat import (
+    ChatCompletionToolParam,
+    ChatCompletionToolChoiceOptionParam,
+    ChatCompletionMessageToolCall,
+)
 
 # --- Configuration for AI Models ---
 # GPT-4.x (planning / validation / final formatting)
@@ -40,6 +47,25 @@ def _ds_endpoint_base() -> str:
     base = (DEEPSEEK_ENDPOINT or "").rstrip("/")
     return base if base.endswith("/models") else f"{base}/models"
 
+# ---------- NEW: OpenAI-compatible base for function-calling ----------
+def _ds_openai_base() -> str:
+    """
+    Normalize to an OpenAI-compatible /v1 root for function-calling via openai.OpenAI.
+    Works with DeepSeek native or OpenAI-compatible proxy (incl. Azure APIM fronts).
+    """
+    base = (os.getenv("DEEPSEEK_OPENAI_BASE") or DEEPSEEK_ENDPOINT or "").rstrip("/")
+    if not base:
+        return ""
+    return base if base.endswith("/v1") else f"{base}/v1"
+
+def _get_ds_openai_client() -> OpenAI:
+    base = _ds_openai_base()
+    key = (DEEPSEEK_KEY or "").strip()
+    if not base or not key:
+        raise RuntimeError("DeepSeek (OpenAI) config missing (endpoint/key).")
+    return OpenAI(api_key=key, base_url=base)
+
+# ---------- Keep your Azure Inference client (used by selftests / planner) ----------
 def _get_deepseek_client() -> ChatCompletionsClient:
     ep = _ds_endpoint_base()
     key = (DEEPSEEK_KEY or "").strip()
@@ -100,9 +126,169 @@ logger = logging.getLogger("wbi")
 pipeline_jobs: Dict[str, Dict[str, Any]] = {}
 estimate_jobs: Dict[str, Dict[str, Any]] = {}
 
-# ==============================================================================
+# ======================================================================
+# NEW: Function (tool) schema + single-call estimator for BoE
+# ======================================================================
+
+# Strongly-typed tools list so Pylance accepts it
+BOE_TOOLS: List[ChatCompletionToolParam] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "emit_estimate",
+            "description": "Return ONLY the structured BoE object.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "project_title": {"type": "string"},
+                    "start_date": {"type": "string", "description": "YYYY-MM-DD"},
+                    "pop": {"type": "integer", "description": "Period of performance in months"},
+                    "work_plan": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "task": {"type": "string"},
+                                "hours": {
+                                    "type": "object",
+                                    "additionalProperties": {"type": "number"}
+                                }
+                            },
+                            "required": ["task", "hours"]
+                        }
+                    },
+                    "materials_and_tools": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "part_number": {"type": "string"},
+                                "description": {"type": "string"},
+                                "vendor": {"type": "string"},
+                                "quantity": {"type": "number"},
+                                "unit_cost": {"type": "number"}
+                            },
+                            "required": ["description", "quantity", "unit_cost"]
+                        }
+                    },
+                    "travel": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "purpose": {"type": "string"},
+                                "trips": {"type": "number"},
+                                "travelers": {"type": "number"},
+                                "days": {"type": "number"},
+                                "airfare": {"type": "number"},
+                                "lodging": {"type": "number"},
+                                "per_diem": {"type": "number"}
+                            },
+                            "required": ["purpose","trips","travelers","days","airfare","lodging","per_diem"]
+                        }
+                    },
+                    "subcontracts": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "subcontractor": {"type": "string"},
+                                "description": {"type": "string"},
+                                "cost": {"type": "number"}
+                            },
+                            "required": ["description","cost"]
+                        }
+                    }
+                },
+                "required": ["project_title","start_date","pop","work_plan","materials_and_tools","travel","subcontracts"],
+                "additionalProperties": False
+            },
+        },
+    }
+]
+
+SYSTEM_PROMPT_BOE = (
+    "You are a Basis-of-Estimate (BoE) engine. "
+    "Call the function 'emit_estimate' with the final structured object. "
+    "Do not include prose."
+)
+
+def deepseek_emit_estimate(new_request: str, case_history: str = "") -> dict:
+    """
+    One OpenAI-compatible call to DeepSeek with function-calling.
+    Returns parsed dict; raises on missing/invalid shape.
+    """
+    client = _get_ds_openai_client()
+
+    tool_choice: ChatCompletionToolChoiceOptionParam = {
+        "type": "function",
+        "function": {"name": "emit_estimate"},
+    }
+
+    resp = client.chat.completions.create(
+        model=(DEEPSEEK_DEPLOYMENT or "deepseek-chat"),
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT_BOE},
+            {
+                "role": "user",
+                "content": (
+                    f"**Case History (optional):**\n{case_history}\n\n"
+                    f"**New Request:**\n{new_request}\n\n"
+                    "Return only via emit_estimate."
+                ),
+            },
+        ],
+        tools=BOE_TOOLS,
+        tool_choice=tool_choice,
+        temperature=0.2,
+    )
+
+    msg = resp.choices[0].message
+    tool_calls = msg.tool_calls
+    if not tool_calls:
+        raise ValueError("Model did not call emit_estimate")
+
+    # Make Pylance happy: narrow the type and guard .function
+    first_call = tcast(ChatCompletionMessageToolCall, tool_calls[0])
+    func_obj = getattr(first_call, "function", None)
+    if func_obj is None:
+        # Fall back to dict access if provider returns a custom shape
+        raw = first_call.model_dump() if hasattr(first_call, "model_dump") else {}
+        func_obj = (raw or {}).get("function")
+    if not func_obj:
+        raise ValueError("Tool call missing function payload")
+
+    args_json = func_obj["arguments"] if isinstance(func_obj, dict) else func_obj.arguments  # type: ignore[index]
+    data = json.loads(args_json)
+
+    # Normalize types
+    if isinstance(data.get("pop"), str):
+        try:
+            data["pop"] = int(float(data["pop"]))
+        except Exception:
+            data["pop"] = 0
+
+    for item in data.get("work_plan", []):
+        hrs = item.get("hours", {})
+        if isinstance(hrs, dict):
+            for role, val in list(hrs.items()):
+                if isinstance(val, str):
+                    try:
+                        hrs[role] = float(val.replace(",", ""))
+                    except Exception:
+                        hrs[role] = 0.0
+
+    # Minimal validation
+    required = ["project_title", "start_date", "pop", "work_plan", "materials_and_tools", "travel", "subcontracts"]
+    for key in required:
+        if key not in data:
+            raise ValueError(f"Missing required key: {key}")
+
+    return data
+
+# ======================================================================
 # CORE APP LOGIC
-# ==============================================================================
+# ======================================================================
 
 def run_pipeline_logic(job_id: str) -> None:
     """Runs the WBI pipeline in a background thread and updates global status."""
@@ -148,71 +334,24 @@ def run_pipeline_logic(job_id: str) -> None:
         pipeline_jobs[job_id]["status"] = "failed"
         pipeline_jobs[job_id]["phase"] = "error"
 
+# ----------------- REPLACED: BoE job uses function-calling -----------------
 def _run_boe_job(job_id: str, new_request: str, case_history: str) -> None:
-    """Background BoE job: plan -> estimate -> finalize; updates estimate_jobs[job_id]."""
+    """Background BoE job: single DeepSeek function-call; updates estimate_jobs[job_id]."""
     estimate_jobs[job_id] = {"status": "running", "log": [], "result": None, "error": None}
     log = estimate_jobs[job_id]["log"]
 
     try:
-        # 1) Planner (DeepSeek)
-        log.append({"text": "Planning…"})
-        plan_resp = deepseek_complete([
-            SystemMessage(content="You are a strategic planner. Return a tight bullet list of BOE sections."),
-            UserMessage(content=f"Create a high-level plan for a BOE based on this request:\n\n{new_request}")
-        ], max_tokens=600, request_timeout=40)
-        plan = (plan_resp.choices[0].message.content or "").strip()
+        log.append({"text": "Calling DeepSeek (function-calling)…"})
+        data = deepseek_emit_estimate(new_request, case_history)
 
-        # 2) Estimator (DeepSeek) – ask for JSON explicitly
-        log.append({"text": "Estimating…"})
-        est_resp = deepseek_complete([
-            SystemMessage(content=(
-                "You are a senior cost estimator. Produce ONLY a JSON object with keys: "
-                "'work_plan', 'materials_and_tools', 'travel', 'subcontracts'."
-            )),
-            UserMessage(content=(
-                f"**Case History:**\n{case_history}\n\n"
-                f"**High-Level Plan:**\n{plan}\n\n"
-                f"**New Request:**\n{new_request}\n\n"
-                f"**Your Task:** Generate the detailed JSON."
-            ))
-        ], max_tokens=2500, request_timeout=60)
-        detailed = (est_resp.choices[0].message.content or "").strip()
-
-        # 3) Finalizer (DeepSeek) – force single well-formed object
-        log.append({"text": "Finalizing…"})
-        final_resp = deepseek_complete([
-            SystemMessage(content=(
-                "You are a strict JSON formatter. Return ONE valid, minified JSON object only. "
-                "Rules:\n"
-                "- Output MUST be valid JSON (RFC 8259). No comments, no prose, no Markdown, no ellipses, no placeholders.\n"
-                "- Use [] for unknown arrays, {} for unknown objects, 0 for unknown numbers, \"\" for unknown strings.\n"
-                "- Keys to include at top level: project_title, start_date, pop, work_plan, materials_and_tools, travel, subcontracts.\n"
-                "- work_plan is an array of {\"task\":\"\",\"hours\":{role:number,...}}.\n"
-                "- materials_and_tools: array of {\"part_number\":\"\",\"description\":\"\",\"vendor\":\"\",\"quantity\":number,\"unit_cost\":number}.\n"
-                "- travel: array of {\"purpose\":\"\",\"trips\":number,\"travelers\":number,\"days\":number,\"airfare\":number,\"lodging\":number,\"per_diem\":number}.\n"
-                "- subcontracts: array of {\"subcontractor\":\"\",\"description\":\"\",\"cost\":number}.\n"
-                "Return JSON only."
-            )),
-
-            UserMessage(content=(
-                f"**Original Request:**\n{new_request}\n\n"
-                f"**Detailed Estimation Data:**\n{detailed}\n\n"
-                f"**Task:** Merge and return one JSON object."
-            ))
-        ], max_tokens=2500, request_timeout=60)
-
-        final_json_str = (final_resp.choices[0].message.content or "").strip()
-        result = _extract_json_from_response(final_json_str) or _try_lenient_json(final_json_str)
-        if not result:
-            raise ValueError("Model returned no valid JSON.")
-
-        estimate_jobs[job_id]["result"] = result
+        estimate_jobs[job_id]["result"] = data
         estimate_jobs[job_id]["status"] = "completed"
-        log.append({"text": "Done."})
+        log.append({"text": "Completed."})
 
     except Exception as e:
         estimate_jobs[job_id]["status"] = "failed"
         estimate_jobs[job_id]["error"] = str(e)
+        log.append({"text": f"ERROR: {e}"})
         logger.error("BoE job %s failed: %s", job_id, e, exc_info=True)
 
 def get_unique_pms():
@@ -284,9 +423,9 @@ def _try_lenient_json(text: str) -> Optional[Dict]:
     except Exception:
         return None
 
-# ==============================================================================
-# ASYNC AI HELPERS
-# ==============================================================================
+# ======================================================================
+# ASYNC AI HELPERS (unchanged)
+# ======================================================================
 
 async def _call_ai_agent(
     client: AsyncAzureOpenAI,
@@ -364,9 +503,9 @@ async def get_improved_ai_summary(description: str, update: str) -> str:
         if client:
             await client.close()
 
-# ==============================================================================
+# ======================================================================
 # FLASK ROUTES
-# ==============================================================================
+# ======================================================================
 
 @app.route("/")
 def index():
@@ -552,7 +691,48 @@ def selftest_deepseek():
     except Exception as e:
         logger.exception("DeepSeek selftest failed")
         return jsonify({"ok": False, "error": str(e)}), 500
-    
+
+@app.route("/api/selftest/deepseek-tools")
+def selftest_deepseek_tools():
+    try:
+        client = _get_ds_openai_client()
+
+        tool_choice: ChatCompletionToolChoiceOptionParam = {
+            "type": "function",
+            "function": {"name": "emit_estimate"},
+        }
+
+        resp = client.chat.completions.create(
+            model=(DEEPSEEK_DEPLOYMENT or "deepseek-chat"),
+            messages=[
+                {"role": "system", "content": "Call emit_estimate with minimal fields."},
+                {"role": "user", "content": "Return a tiny BoE"},
+            ],
+            tools=BOE_TOOLS,
+            tool_choice=tool_choice,
+            temperature=0,
+        )
+
+        msg = resp.choices[0].message
+        tool_calls = msg.tool_calls
+        if not tool_calls:
+            return jsonify({"ok": False, "error": "No tool_calls returned"}), 500
+
+        first_call = tcast(ChatCompletionMessageToolCall, tool_calls[0])
+        func_obj = getattr(first_call, "function", None)
+        if func_obj is None:
+            raw = first_call.model_dump() if hasattr(first_call, "model_dump") else {}
+            func_obj = (raw or {}).get("function")
+        if not func_obj:
+            return jsonify({"ok": False, "error": "No function payload"}), 500
+
+        args = func_obj["arguments"] if isinstance(func_obj, dict) else func_obj.arguments  # type: ignore[index]
+        json.loads(args)  # validate it’s JSON
+        return jsonify({"ok": True, "raw_args": args})
+    except Exception as e:
+        logger.exception("DeepSeek tools selftest failed")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
 @app.route("/api/selftest/aoai")
 def selftest_aoai():
     from openai import AsyncAzureOpenAI
@@ -577,6 +757,7 @@ def selftest_aoai():
         finally:
             await client.close()
     try:
+        import asyncio
         out = asyncio.run(go())
         return jsonify({"ok": True, "raw": out})
     except Exception as e:
