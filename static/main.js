@@ -733,6 +733,25 @@ function getCurrentProjectData() {
     return { project_title, start_date, pop, work_plan, materials_and_tools, travel, subcontracts };
 }
 
+async function pollBoeJob(jobId, { intervalMs = 2000, maxWaitMs = 120000 } = {}) {
+    const start = Date.now();
+    while (true) {
+        const r = await fetch(`/api/estimate/${jobId}`, { method: 'GET' });
+        if (!r.ok) throw new Error(`poll failed ${r.status}`);
+        const payload = await r.json();
+
+        if (payload.log && Array.isArray(payload.log)) {
+            console.debug('[AI] log:', payload.log.map(l => l.text).join(' | '));
+        }
+
+        if (payload.status === 'completed') return payload.result;
+        if (payload.status === 'failed') throw new Error(payload.error || 'BoE failed');
+
+        if (Date.now() - start > maxWaitMs) throw new Error('BoE polling timed out');
+        await new Promise(res => setTimeout(res, intervalMs));
+    }
+}
+
 async function handleAIEstimate() {
     const btn = document.getElementById('ai-estimate-btn');
     const spinner = document.getElementById('ai-spinner');
@@ -784,6 +803,23 @@ async function handleAIEstimate() {
             console.error('[AI] Non-OK response:', msg);
             alert(`AI Estimate failed.\n\n${msg}`);
             return;
+        }
+
+        const kickoff = await response.json();
+        if (kickoff.job_id) {
+            console.log('[AI] job id:', kickoff.job_id);
+            try {
+                const result = await pollBoeJob(kickoff.job_id, { intervalMs: 2000, maxWaitMs: 180000 });
+                console.log('[AI] job done:', result);
+                updateUIFromData(result);
+                const laborTabBtn = document.querySelector('button[data-boetab="labor"]');
+                if (laborTabBtn) laborTabBtn.click();
+            } catch (err) {
+                console.error('[AI] BoE error:', err);
+                alert('AI estimate failed: ' + err.message);
+            }
+        } else {
+            alert('AI did not return a job_id.');
         }
 
         const aiResponse = await response.json().catch(err => {
