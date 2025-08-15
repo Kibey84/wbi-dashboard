@@ -10,11 +10,16 @@ import uuid
 import re
 from xlsxwriter.workbook import Workbook
 from typing import cast, Optional, Dict, Any
-
+import time
 from fpdf import FPDF
 
 from tools import org_chart_parser
 from tools import wbiops
+
+from azure.ai.inference import ChatCompletionsClient
+from azure.ai.inference.models import SystemMessage, UserMessage
+from azure.core.credentials import AzureKeyCredential
+from azure.core.exceptions import HttpResponseError, ServiceRequestError
 
 from azure.storage.blob import BlobServiceClient
 from openai import AsyncAzureOpenAI
@@ -30,6 +35,48 @@ DEEPSEEK_ENDPOINT = os.getenv("DEEPSEEK_AZURE_ENDPOINT") or os.getenv("DEEPSEEK_
 DEEPSEEK_KEY = os.getenv("DEEPSEEK_AZURE_KEY") or os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_DEPLOYMENT = os.getenv("DEEPSEEK_DEPLOYMENT", "WBI-Dash-DeepSeek")
 
+def _ds_endpoint_base() -> str:
+    # Accept either …/models or root; normalize to …/models
+    base = (DEEPSEEK_ENDPOINT or "").rstrip("/")
+    return base if base.endswith("/models") else f"{base}/models"
+
+def _get_deepseek_client() -> ChatCompletionsClient:
+    ep = _ds_endpoint_base()
+    key = (DEEPSEEK_KEY or "").strip()
+    if not ep or not key:
+        raise RuntimeError("DeepSeek config missing (endpoint/key).")
+    return ChatCompletionsClient(
+        endpoint=ep,
+        credential=AzureKeyCredential(key),
+        api_version="2024-05-01-preview",
+    )
+
+def deepseek_complete(messages, max_tokens=2048, temperature=0.2, request_timeout=45):
+    client = _get_deepseek_client()
+    attempt = 0
+    last_err = None
+    while attempt < 2:
+        try:
+            return client.complete(
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                model=(DEEPSEEK_DEPLOYMENT or "DeepSeek-R1-0528"),
+                stream=False,
+                # supported via pipeline policies in recent SDKs; if ignored, service default applies
+                timeout=request_timeout,
+            )
+        except (HttpResponseError, ServiceRequestError) as e:
+            last_err = e
+            code = getattr(e, "status_code", None)
+            if code in (429, 500, 502, 503, 504) or isinstance(e, ServiceRequestError):
+                time.sleep(1.2 if attempt == 0 else 2.5)
+                attempt += 1
+                continue
+            raise
+    # final raise if both attempts failed
+    raise last_err if last_err else RuntimeError("DeepSeek request failed")
+
 print("Flask App Loaded. STORAGE:", os.environ.get("AZURE_STORAGE_CONNECTION_STRING"))
 
 basedir = os.path.abspath(os.path.dirname(__file__))
@@ -39,7 +86,7 @@ app = Flask(
     static_folder=os.path.join(basedir, "static"),
 )
 
-REPORTS_DIR = os.path.join(os.getcwd(), "generated_reports")
+REPORTS_DIR = os.getenv("REPORTS_DIR", "/home/data/generated_reports")
 os.makedirs(REPORTS_DIR, exist_ok=True)
 
 BLOB_CONTAINER_NAME = "data"
@@ -382,22 +429,6 @@ def get_rates():
 
 @app.route("/api/estimate", methods=["POST"])
 async def api_estimate_boe():
-    """
-    Orchestrates a team of AI agents to generate a Basis of Estimate.
-    GPT-4.x: planning + final formatting
-    DeepSeek: detailed estimation JSON
-    """
-    # Concrete strings for Pylance + runtime guard
-    aoai_endpoint: str = (AZURE_OPENAI_ENDPOINT or "").strip()
-    aoai_key: str = (AZURE_OPENAI_KEY or "").strip()
-    aoai_deploy: str = (AZURE_OPENAI_DEPLOYMENT or "").strip()
-    ds_endpoint: str = (DEEPSEEK_ENDPOINT or "").strip()
-    ds_key: str = (DEEPSEEK_KEY or "").strip()
-    ds_deploy: str = (DEEPSEEK_DEPLOYMENT or "").strip()
-
-    if not all([aoai_endpoint, aoai_key, aoai_deploy, ds_endpoint, ds_key, ds_deploy]):
-        return jsonify({"error": "Server configuration error: AI credentials missing."}), 500
-
     data = request.get_json()
     if not data:
         return jsonify({"error": "Invalid request"}), 400
@@ -407,76 +438,98 @@ async def api_estimate_boe():
     if not new_request:
         return jsonify({"error": "New request data is missing."}), 400
 
-    gpt4_client: Optional[AsyncAzureOpenAI] = None
-    deepseek_client: Optional[AsyncAzureOpenAI] = None
-
     try:
-        # Clients (kept separate endpoints/keys)
-        gpt4_client = AsyncAzureOpenAI(
-            azure_endpoint=aoai_endpoint,
-            api_key=aoai_key,
-            api_version="2024-02-01",
-        )
-        deepseek_client = AsyncAzureOpenAI(
-            azure_endpoint=ds_endpoint,
-            api_key=ds_key,
-            api_version="2024-02-01",
-        )
+        # 1) Planner (DeepSeek)
+        plan_resp = deepseek_complete([
+            SystemMessage(content="You are a strategic planner. Return a tight bullet list of BOE sections."),
+            UserMessage(content=f"Create a high-level plan for a BOE based on this request:\n\n{new_request}")
+        ], max_tokens=800)
+        plan = (plan_resp.choices[0].message.content or "").strip()
 
-        # 1) Planner (GPT-4.x)
-        planner_system_prompt = (
-            "You are a strategic planner. Analyze the user's request and create a high-level, "
-            "bulleted list of key sections needed for a comprehensive Basis of Estimate (BOE)."
-        )
-        planner_user_prompt = f"Create a high-level plan for a BOE based on this request:\n\n{new_request}"
-        plan = await _call_ai_agent(gpt4_client, aoai_deploy, planner_system_prompt, planner_user_prompt)
-        logger.info("AI Planner Output:\n%s", plan)
+        # 2) Estimator (DeepSeek) – ask for JSON explicitly
+        est_resp = deepseek_complete([
+            SystemMessage(content=(
+                "You are a senior cost estimator. Produce ONLY a JSON object with keys: "
+                "'work_plan', 'materials_and_tools', 'travel', 'subcontracts'."
+            )),
+            UserMessage(content=(
+                f"**Case History:**\n{case_history}\n\n"
+                f"**High-Level Plan:**\n{plan}\n\n"
+                f"**New Request:**\n{new_request}\n\n"
+                f"**Your Task:** Generate the detailed JSON."
+            ))
+        ], max_tokens=4096)
+        detailed_estimation_str = (est_resp.choices[0].message.content or "").strip()
 
-        # 2) Estimator (DeepSeek) -> JSON
-        estimator_system_prompt = (
-            "You are a senior cost estimator. Take the plan and new request, analyze against the case history, "
-            "and generate the detailed line items for the BOE. Provide ONLY a JSON object with keys: "
-            "'work_plan', 'materials_and_tools', 'travel', 'subcontracts'."
-        )
-        estimator_user_prompt = (
-            f"**Case History:**\n{case_history}\n\n"
-            f"**High-Level Plan:**\n{plan}\n\n"
-            f"**New Request:**\n{new_request}\n\n"
-            f"**Your Task:** Generate the detailed JSON data for the work plan, materials, travel, and subcontracts."
-        )
-        detailed_estimation_str = await _call_ai_agent(
-            deepseek_client, ds_deploy, estimator_system_prompt, estimator_user_prompt, is_json=True
-        )
+        # 3) Finalizer (DeepSeek) – force single well-formed object
+        final_resp = deepseek_complete([
+            SystemMessage(content=(
+                "You are a strict formatter. Output ONE valid JSON object for the final BoE. "
+                "Add top-level keys like 'project_title' and 'assumptions' if implied. "
+                "Output JSON only—no prose."
+            )),
+            UserMessage(content=(
+                f"**Original Request:**\n{new_request}\n\n"
+                f"**Detailed Estimation Data:**\n{detailed_estimation_str}\n\n"
+                f"**Task:** Merge and return one JSON object."
+            ))
+        ], max_tokens=4096)
 
-        # 3) Finalizer (GPT-4.x) -> single strict JSON
-        finalizer_system_prompt = (
-            "You are a data formatting specialist. Take the provided text and ensure it is a single, perfectly "
-            "structured JSON object that matches the required final BoE format. Include top-level keys like "
-            "'project_title' and 'assumptions' if they are implied."
-        )
-        finalizer_user_prompt = (
-            f"**Original Request:**\n{new_request}\n\n"
-            f"**Detailed Estimation Data:**\n{detailed_estimation_str}\n\n"
-            f"**Your Task:** Combine all information into one valid JSON object matching the final BoE structure."
-        )
-        final_json_str = await _call_ai_agent(
-            gpt4_client, aoai_deploy, finalizer_system_prompt, finalizer_user_prompt, is_json=True
-        )
-
+        final_json_str = (final_resp.choices[0].message.content or "").strip()
         final_json = _extract_json_from_response(final_json_str)
         if not final_json:
-            return jsonify({"error": "The final AI agent failed to produce a valid JSON object."}), 500
+            return jsonify({
+                "error": "Model did not return valid JSON.",
+                "raw_sample": final_json_str[:400]
+            }), 502
 
         return jsonify(final_json), 200
 
     except Exception as e:
         logger.error("Error in /api/estimate: %s", e, exc_info=True)
-        return jsonify({"error": "An internal server error occurred during AI processing."}), 500
-    finally:
-        if gpt4_client:
-            await gpt4_client.close()
-        if deepseek_client:
-            await deepseek_client.close()
+        return jsonify({"error": f"BoE failed: {e}"}), 500
+
+@app.route("/api/selftest/deepseek")
+def selftest_deepseek():
+    try:
+        resp = deepseek_complete([
+            SystemMessage(content="You echo JSON only."),
+            UserMessage(content='Return {"ok":true,"model":"$MODEL"}')
+        ], max_tokens=32, temperature=0)
+        text = (resp.choices[0].message.content or "").strip()
+        return jsonify({"ok": True, "raw": text})
+    except Exception as e:
+        logger.exception("DeepSeek selftest failed")
+        return jsonify({"ok": False, "error": str(e)}), 500
+    
+@app.route("/api/selftest/aoai")
+def selftest_aoai():
+    from openai import AsyncAzureOpenAI
+    import asyncio
+    async def go():
+        client = AsyncAzureOpenAI(
+            azure_endpoint=(AZURE_OPENAI_ENDPOINT or "").strip(),
+            api_key=(AZURE_OPENAI_KEY or "").strip(),
+            api_version="2024-02-01",
+        )
+        try:
+            resp = await client.chat.completions.create(
+                model=(AZURE_OPENAI_DEPLOYMENT or "").strip(),
+                messages=[
+                    {"role": "system", "content": "You output JSON only."},
+                    {"role": "user", "content": '{"ok":true}'}
+                ],
+                response_format={"type": "json_object"},
+                max_tokens=10,
+            )
+            return (resp.choices[0].message.content or "").strip()
+        finally:
+            await client.close()
+    try:
+        out = asyncio.run(go())
+        return jsonify({"ok": True, "raw": out})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 @app.route("/api/generate-boe-excel", methods=["POST"])
 def generate_boe_excel():
