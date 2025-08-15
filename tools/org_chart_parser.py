@@ -150,8 +150,10 @@ TEXT TO PARSE:
         return []
 
     data = _load_json_lenient(raw)
+    if isinstance(data, dict):
+        data = [data]  # wrap single object in a list
     if isinstance(data, list):
-        out: List[dict] = []
+        out = []
         for item in data:
             if not isinstance(item, dict):
                 continue
