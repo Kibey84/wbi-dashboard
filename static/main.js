@@ -753,105 +753,101 @@ async function pollBoeJob(jobId, { intervalMs = 2000, maxWaitMs = 120000 } = {})
 }
 
 async function handleAIEstimate() {
-    const btn = document.getElementById('ai-estimate-btn');
-    const spinner = document.getElementById('ai-spinner');
-    const btnText = document.getElementById('ai-btn-text');
+  const btn = document.getElementById('ai-estimate-btn');
+  const spinner = document.getElementById('ai-spinner');
+  const btnText = document.getElementById('ai-btn-text');
 
-    btn.disabled = true;
-    spinner.classList.remove('hidden');
-    btnText.textContent = "Estimating...";
+  btn.disabled = true;
+  spinner.classList.remove('hidden');
+  btnText.textContent = "Estimating...";
 
-    const scope = document.getElementById('scope').value || '';
-    const pop = document.getElementById('pop').value || '';
-    const personnel = Array.from(document.querySelectorAll('#personnel-checkboxes input:checked'))
-        .map(cb => cb.value);
+  const scope = document.getElementById('scope').value || '';
+  const pop = document.getElementById('pop').value || '';
+  const personnel = Array.from(document.querySelectorAll('#personnel-checkboxes input:checked')).map(cb => cb.value);
 
-    if (personnel.length === 0) {
-        alert("Please select at least one personnel role.");
-        btn.disabled = false;
-        spinner.classList.add('hidden');
-        btnText.textContent = "AI Estimate Full Project";
-        return;
-    }
+  if (personnel.length === 0) {
+    alert("Please select at least one personnel role.");
+    btn.disabled = false;
+    spinner.classList.add('hidden');
+    btnText.textContent = "AI Estimate Full Project";
+    return;
+  }
 
-    const new_request = `**Scope of Work:** ${scope}
+  const new_request = `**Scope of Work:** ${scope}
 **Period of Performance:** ${pop} months
 **Available Personnel:** ${personnel.join(', ')}`;
 
-    const case_history = "";
+  const case_history = "";
 
-    const controller = new AbortController();
-    const timeoutMs = 120000; // 60s
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const controller = new AbortController();
+  const timeoutMs = 120000;
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-    console.log('[AI] Sending /api/estimate …', { timeoutMs, payloadPreview: new_request.slice(0, 200) + '…' });
+  console.log('[AI] Sending /api/estimate …', { timeoutMs, payloadPreview: new_request.slice(0, 200) + '…' });
 
-    try {
-        const response = await fetch('/api/estimate', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ new_request, case_history }),
-            signal: controller.signal
-        });
+  try {
+    const res = await fetch('/api/estimate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ new_request, case_history }),
+      signal: controller.signal
+    });
 
-        console.log('[AI] /api/estimate response:', response.status, response.statusText);
+    console.log('[AI] /api/estimate response:', res.status, res.statusText);
 
-        if (!response.ok) {
-            let text = '';
-            try { text = await response.text(); } catch {}
-            const msg = `Server returned ${response.status} ${response.statusText}${text ? `\n\nBody:\n${text}` : ''}`;
-            console.error('[AI] Non-OK response:', msg);
-            alert(`AI Estimate failed.\n\n${msg}`);
-            return;
-        }
+    // Read the body ONCE as text, then decide
+    const text = await res.text();
 
-        const kickoff = await response.json();
-        if (kickoff.job_id) {
-            console.log('[AI] job id:', kickoff.job_id);
-            try {
-                const result = await pollBoeJob(kickoff.job_id, { intervalMs: 2000, maxWaitMs: 180000 });
-                console.log('[AI] job done:', result);
-                updateUIFromData(result);
-                const laborTabBtn = document.querySelector('button[data-boetab="labor"]');
-                if (laborTabBtn) laborTabBtn.click();
-            } catch (err) {
-                console.error('[AI] BoE error:', err);
-                alert('AI estimate failed: ' + err.message);
-            }
-        } else {
-            alert('AI did not return a job_id.');
-        }
-
-        const aiResponse = await response.json().catch(err => {
-            console.error('[AI] JSON parse error:', err);
-            throw new Error('Response was not valid JSON.');
-        });
-
-        console.log('[AI] Parsed JSON:', aiResponse);
-
-        if (aiResponse && typeof aiResponse === 'object') {
-            updateUIFromData(aiResponse);
-
-            const laborTabBtn = document.querySelector('button[data-boetab="labor"]');
-            if (laborTabBtn) laborTabBtn.click();
-        } else {
-            alert('AI returned an unexpected payload. Check console for details.');
-            console.warn('[AI] Unexpected payload:', aiResponse);
-        }
-    } catch (error) {
-        if (error.name === 'AbortError') {
-            console.error('[AI] Request timed out after', timeoutMs, 'ms');
-            alert(`AI Estimate timed out after ${timeoutMs/1000}s. Check server availability or logs.`);
-        } else {
-            console.error('[AI] Estimation error:', error);
-            alert(`Failed to get an estimate: ${error.message}`);
-        }
-    } finally {
-        clearTimeout(timeoutId);
-        btn.disabled = false;
-        spinner.classList.add('hidden');
-        btnText.textContent = "AI Estimate Full Project";
+    if (!res.ok) {
+      console.error('[AI] Non-OK response body:', text);
+      alert(`AI Estimate failed.\n\n${res.status} ${res.statusText}`);
+      return;
     }
+
+    // Expect a kickoff payload: { job_id, status }
+    let kickoff;
+    try {
+      kickoff = JSON.parse(text);
+    } catch (e) {
+      console.error('[AI] kickoff JSON parse error:', e, 'body:', text);
+      alert('AI Estimate failed: server returned non-JSON kickoff response.');
+      return;
+    }
+
+    if (!kickoff.job_id) {
+      console.error('[AI] kickoff missing job_id:', kickoff);
+      alert('AI did not return a job_id.');
+      return;
+    }
+
+    console.log('[AI] job id:', kickoff.job_id);
+
+    // Poll until done
+    try {
+      const result = await pollBoeJob(kickoff.job_id, { intervalMs: 2000, maxWaitMs: 180000 });
+      console.log('[AI] job done:', result);
+      updateUIFromData(result);
+      const laborTabBtn = document.querySelector('button[data-boetab="labor"]');
+      if (laborTabBtn) laborTabBtn.click();
+    } catch (err) {
+      console.error('[AI] BoE error:', err);
+      alert('AI estimate failed: ' + err.message);
+    }
+
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      console.error('[AI] Request timed out after', timeoutMs, 'ms');
+      alert(`AI Estimate timed out after ${timeoutMs/1000}s. Check server availability or logs.`);
+    } else {
+      console.error('[AI] Estimation error:', error);
+      alert(`Failed to get an estimate: ${error.message}`);
+    }
+  } finally {
+    clearTimeout(timeoutId);
+    btn.disabled = false;
+    spinner.classList.add('hidden');
+    btnText.textContent = "AI Estimate Full Project";
+  }
 }
 
 async function handleGenerateBoe() {

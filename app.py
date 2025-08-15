@@ -182,19 +182,27 @@ def _run_boe_job(job_id: str, new_request: str, case_history: str) -> None:
         log.append({"text": "Finalizing…"})
         final_resp = deepseek_complete([
             SystemMessage(content=(
-                "You are a strict formatter. Output ONE valid JSON object for the final BoE. "
-                "Add top-level keys like 'project_title' and 'assumptions' if implied. "
-                "Output JSON only—no prose."
+                "You are a strict JSON formatter. Return ONE valid, minified JSON object only. "
+                "Rules:\n"
+                "- Output MUST be valid JSON (RFC 8259). No comments, no prose, no Markdown, no ellipses, no placeholders.\n"
+                "- Use [] for unknown arrays, {} for unknown objects, 0 for unknown numbers, \"\" for unknown strings.\n"
+                "- Keys to include at top level: project_title, start_date, pop, work_plan, materials_and_tools, travel, subcontracts.\n"
+                "- work_plan is an array of {\"task\":\"\",\"hours\":{role:number,...}}.\n"
+                "- materials_and_tools: array of {\"part_number\":\"\",\"description\":\"\",\"vendor\":\"\",\"quantity\":number,\"unit_cost\":number}.\n"
+                "- travel: array of {\"purpose\":\"\",\"trips\":number,\"travelers\":number,\"days\":number,\"airfare\":number,\"lodging\":number,\"per_diem\":number}.\n"
+                "- subcontracts: array of {\"subcontractor\":\"\",\"description\":\"\",\"cost\":number}.\n"
+                "Return JSON only."
             )),
+
             UserMessage(content=(
                 f"**Original Request:**\n{new_request}\n\n"
                 f"**Detailed Estimation Data:**\n{detailed}\n\n"
                 f"**Task:** Merge and return one JSON object."
             ))
         ], max_tokens=2500, request_timeout=60)
-        final_json_str = (final_resp.choices[0].message.content or "").strip()
 
-        result = _extract_json_from_response(final_json_str)
+        final_json_str = (final_resp.choices[0].message.content or "").strip()
+        result = _extract_json_from_response(final_json_str) or _try_lenient_json(final_json_str)
         if not result:
             raise ValueError("Model returned no valid JSON.")
 
@@ -254,6 +262,27 @@ def _extract_json_from_response(text: str) -> Optional[Dict]:
             return None
     logger.error(f"No valid JSON object found in response: {text[:500]}")
     return None
+
+def _try_lenient_json(text: str) -> Optional[Dict]:
+    """Attempt to coerce near-JSON into valid JSON."""
+    if not text:
+        return None
+    m = re.search(r"\{.*\}", text, re.DOTALL)
+    if not m:
+        return None
+    s = m.group(0)
+
+    # Replace common junk the model emits
+    s = re.sub(r"\{\s*\.\.\.\s*\}", "{}", s)
+    s = re.sub(r"\[\s*\.\.\.\s*\]", "[]", s)
+    s = s.replace("[calculated value]", "0")
+    s = re.sub(r"\bNaN\b", "0", s)
+    s = re.sub(r"(?m)^\s*//.*$", "", s)  # strip JS-style comments if any
+
+    try:
+        return json.loads(s)
+    except Exception:
+        return None
 
 # ==============================================================================
 # ASYNC AI HELPERS
