@@ -7,7 +7,7 @@ import json
 import re
 import random
 from datetime import datetime
-from typing import Dict, Optional, Any, List
+from typing import Dict, Optional, Any, List, Tuple
 
 # Document and file handling imports
 from docx import Document
@@ -19,7 +19,7 @@ from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 
 import httpx
-from openai import AsyncAzureOpenAI, APITimeoutError
+from openai import AsyncAzureOpenAI, APITimeoutError, RateLimitError
 
 # ====== CONFIGURATION & CONSTANTS ======
 AZURE_OPENAI_ENDPOINT = (os.getenv("AZURE_OPENAI_ENDPOINT") or "").strip()
@@ -40,13 +40,13 @@ GRADING_WEIGHTS: Dict[str, float] = {
 }
 
 # ====== HTTP/CLIENT POOLING ======
-# Tunables (override via env if needed)
-MAX_CONNECTIONS = int(os.getenv("GRADING_MAX_CONNECTIONS", "12"))
-CONCURRENCY = int(os.getenv("GRADING_CONCURRENCY", "6"))  # modest to avoid gateway rate limiting
-CONNECT_TIMEOUT = float(os.getenv("GRADING_CONNECT_TIMEOUT", "30"))
-READ_TIMEOUT = float(os.getenv("GRADING_READ_TIMEOUT", "120"))
-POOL_TIMEOUT = float(os.getenv("GRADING_POOL_TIMEOUT", "60"))
-USE_HTTP2 = os.getenv("GRADING_HTTP2", "false").lower() in {"1", "true", "yes"}
+MAX_CONNECTIONS = 4
+CONCURRENCY = 2                 # keep modest to reduce 429s
+CONNECT_TIMEOUT = 30.0
+READ_TIMEOUT = 120.0
+POOL_TIMEOUT = 60.0
+USE_HTTP2 = False               # flip to True only if your Azure endpoint supports it
+GRADING_BATCH_SIZE = 4          # used by the batching loop below
 
 _HTTP_LIMITS = httpx.Limits(
     max_connections=MAX_CONNECTIONS,
@@ -84,6 +84,17 @@ def _extract_json_lenient(text: str) -> Optional[Dict[str, Any]]:
         return json.loads(s)
     except Exception:
         return None
+    
+def _retry_after_seconds_from_429_message(msg: str) -> float:
+    # Azure often says: "Please retry after X seconds."
+    m = re.search(r"retry after (\d+) second", msg, re.IGNORECASE)
+    if m:
+        try:
+            return float(m.group(1))
+        except Exception:
+            pass
+    # default backoff if not present
+    return 2.0
 
 # ====== AI GRADING FUNCTION (RETRY & THROTTLE) ======
 async def get_ai_grading(dossier_text: str) -> Dict[str, Any]:
@@ -122,14 +133,16 @@ Dossier Text:
                         {"role": "user", "content": user_prompt},
                     ],
                     temperature=0.1,
-                    max_tokens=1200,
+                    max_tokens=700,
                     timeout=READ_TIMEOUT,
-                    # If your Azure supports JSON mode, uncomment:
-                    # response_format={"type": "json_object"},
+                    response_format={"type": "json_object"},
                 )
                 raw_content = (resp.choices[0].message.content or "").strip()
                 if not raw_content:
                     raise RuntimeError("AI returned an empty response.")
+                
+                raw_preview = raw_content[:400].replace("\n", " ")
+                logging.debug("AI raw preview: %s%s", raw_preview, "..." if len(raw_content) > 400 else "")
 
                 # strict parse first
                 try:
@@ -145,9 +158,21 @@ Dossier Text:
 
                 raise ValueError("AI returned a non-JSON or malformed JSON response.")
 
+            except RateLimitError as e:
+                # Respect server hint and continue backoff curve
+                msg = str(e)
+                sleep_for = max(_retry_after_seconds_from_429_message(msg), 1.0)
+                logging.warning("429 rate limit on grading (attempt %d/%d). Sleeping %.1fs. %s",
+                                attempt + 1, max_attempts, sleep_for, e)
+                if attempt == max_attempts - 1:
+                    logging.error("Final 429 on grading: %s", e, exc_info=True)
+                    return {"error": "Rate limited."}
+                await asyncio.sleep(sleep_for)
+                backoff *= 1.6
+
             except (APITimeoutError, httpx.ReadTimeout, httpx.ConnectTimeout, httpx.PoolTimeout) as e:
-                # transient/timeouts → backoff & retry
-                logging.warning("Transient timeout on grading (attempt %d/%d): %s", attempt + 1, max_attempts, e)
+                logging.warning("Transient timeout on grading (attempt %d/%d): %s",
+                                attempt + 1, max_attempts, e)
                 if attempt == max_attempts - 1:
                     logging.error("Final timeout on grading: %s", e, exc_info=True)
                     return {"error": "Request timed out."}
@@ -156,7 +181,8 @@ Dossier Text:
                 backoff *= 1.8
 
             except httpx.HTTPError as e:
-                logging.warning("HTTP error on grading (attempt %d/%d): %s", attempt + 1, max_attempts, e)
+                logging.warning("HTTP error on grading (attempt %d/%d): %s",
+                                attempt + 1, max_attempts, e)
                 if attempt == max_attempts - 1:
                     logging.error("HTTP error on grading: %s", e, exc_info=True)
                     return {"error": str(e)}
@@ -165,7 +191,7 @@ Dossier Text:
                 backoff *= 1.8
 
             except Exception as e:
-                # Non-transient error → no spin
+                # Log the first ~400 chars of content to diagnose non-JSON (but don't crash the batch)
                 logging.error("AI grading failed (non-retryable): %s", e, exc_info=True)
                 return {"error": "AI returned a non-JSON response."}
 
@@ -279,7 +305,8 @@ async def run_grading_process() -> None:
     dossier_files = glob.glob(os.path.join(DOSSIER_FOLDER, "*.docx"))
     logging.info("Found %d dossiers to process.", len(dossier_files))
 
-    tasks: List[asyncio.Task] = []
+    # === Build inputs first ===
+    entries: List[Tuple[str, str]] = []  # (company_name, full_text)
     company_data_map: Dict[str, Dict[str, str]] = {}
 
     for file_path in dossier_files:
@@ -289,14 +316,30 @@ async def run_grading_process() -> None:
                 continue
             company_name = doc.paragraphs[0].text.replace("Dossier:", "").strip()
             full_text = "\n".join(p.text for p in doc.paragraphs)
-            tasks.append(asyncio.create_task(get_ai_grading(full_text)))
+            entries.append((company_name, full_text))
             company_data_map[company_name] = {"url": company_urls.get(company_name, "N/A")}
         except Exception as e:
             logging.error("Error reading dossier %s: %s", file_path, e)
 
-    ai_grades = await asyncio.gather(*tasks, return_exceptions=True)
+    # === Process in small batches to avoid 429s ===
+    batch_size = GRADING_BATCH_SIZE
+    names_order: List[str] = []
+    ai_grades: List[Any] = []
 
-    for (company_name, data), grade in zip(company_data_map.items(), ai_grades):
+    for i in range(0, len(entries), batch_size):
+        batch = entries[i:i + batch_size]
+        names_order.extend([nm for nm, _ in batch])
+
+        batch_tasks = [
+            asyncio.create_task(get_ai_grading(txt))
+            for (_, txt) in batch
+        ]
+        batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+        ai_grades.extend(batch_results)
+
+    for company_name, grade in zip(names_order, ai_grades):
+        data = company_data_map.get(company_name, {"url": "N/A"})
+
         if isinstance(grade, Exception):
             logging.error("Failed grading for %s: %s", company_name, grade)
             continue
