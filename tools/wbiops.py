@@ -21,26 +21,10 @@ from azure.core.credentials import AzureKeyCredential
 from openai import AsyncAzureOpenAI
 
 # --- All Module Imports ---
-from .dod_sbir_scraper import fetch_dod_sbir_sttr_topics
-from .nasa_sbir_module import fetch_nasa_sbir_opportunities
-from .darpa_module import fetch_darpa_opportunities
-from .arpah_module import fetch_arpah_opportunities
-from .eureka_module import fetch_eureka_opportunities
-from .nsin_module import fetch_nsin_opportunities
-from .nih_sbir_module import fetch_nih_sbir_opportunities
-from .nstxl_module import fetch_nstxl_opportunities
-from .mtec_module import fetch_mtec_opportunities
-from .afwerx_module import fetch_afwerx_opportunities
-from .diu_scraper import fetch_diu_opportunities
-from .socom_baa_module import fetch_socom_opportunities
-from .arl_opportunities_module import fetch_arl_opportunities
-from .nasc_solutions_module import fetch_nasc_opportunities
-from .osti_foa_module import fetch_osti_foas
-from .arpae_scraper import fetch_arpae_opportunities
-from .iarpa_scraper import fetch_iarpa_opportunities
-from .sbir_pipeline_scraper import fetch_sbir_partnership_opportunities
-from .sam_gov_module import fetch_sam_gov_opportunities
+from . import FETCH_FUNCTIONS
 
+# --- Constants ---
+# Set to True for testing mode, which skips AI analysis and uses dummy data
 TESTING_MODE = False
 
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -102,8 +86,8 @@ def load_scraper_config():
         func_name = scraper.get('function')
         if not func_name:
             continue
-        if hasattr(sys.modules[__name__], func_name):
-            scraper['function'] = getattr(sys.modules[__name__], func_name)
+        if func_name in FETCH_FUNCTIONS:
+            scraper['function'] = FETCH_FUNCTIONS[func_name]
             valid.append(scraper)
         logging.info("Loaded scrapers: " + ", ".join(s['name'] for s in valid))
     return valid
