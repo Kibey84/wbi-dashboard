@@ -81,6 +81,7 @@ def deepseek_complete(messages, max_tokens=2048, temperature=0.2, request_timeou
     """Enhanced DeepSeek completion with exponential backoff."""
     client = _get_deepseek_client()
     
+    last_err = None
     for attempt in range(MAX_RETRY_ATTEMPTS):
         try:
             return client.complete(
@@ -92,6 +93,7 @@ def deepseek_complete(messages, max_tokens=2048, temperature=0.2, request_timeou
                 timeout=request_timeout,
             )
         except (HttpResponseError, ServiceRequestError) as e:
+            last_err = e
             code = getattr(e, "status_code", None)
             is_retryable = code in (429, 500, 502, 503, 504) or isinstance(e, ServiceRequestError)
             
@@ -104,7 +106,7 @@ def deepseek_complete(messages, max_tokens=2048, temperature=0.2, request_timeou
             logger.error(f"DeepSeek request failed after {attempt + 1} attempts: {e}")
             raise
     
-    raise RuntimeError("DeepSeek request failed after all retry attempts")
+    raise RuntimeError("DeepSeek request failed after all retry attempts") from last_err
 
 # Initialize Flask app
 basedir = os.path.abspath(os.path.dirname(__file__))
@@ -135,22 +137,20 @@ pipeline_jobs: Dict[str, Dict[str, Any]] = {}
 estimate_jobs: Dict[str, Dict[str, Any]] = {}
 
 def cleanup_old_jobs() -> None:
-    """Remove old completed jobs to prevent memory leaks."""
+    """Remove old completed or failed jobs to prevent memory leaks."""
     current_time = time.time()
     cutoff_time = current_time - JOB_RETENTION_TIME
     
-    # Clean pipeline jobs
     expired_pipeline = [
         job_id for job_id, job_data in pipeline_jobs.items()
-        if job_data.get("created_at", current_time) < cutoff_time
+        if job_data.get("status") in ["completed", "failed"] and job_data.get("created_at", current_time) < cutoff_time
     ]
     for job_id in expired_pipeline:
         del pipeline_jobs[job_id]
     
-    # Clean estimate jobs  
     expired_estimate = [
         job_id for job_id, job_data in estimate_jobs.items()
-        if job_data.get("created_at", current_time) < cutoff_time
+        if job_data.get("status") in ["completed", "failed"] and job_data.get("created_at", current_time) < cutoff_time
     ]
     for job_id in expired_estimate:
         del estimate_jobs[job_id]
@@ -212,22 +212,27 @@ def deepseek_emit_estimate(new_request: str, case_history: str) -> Dict[str, Any
         if not detailed:
             raise ValueError("Estimation step returned empty response")
 
-        # Step 3: JSON formatting with validation (CORRECTED PROMPT)
+        # Step 3: JSON formatting with validation
         logger.info("Step 3: Formatting as structured JSON")
         final_resp = deepseek_complete([
             SystemMessage(content=(
-                "You are a strict JSON formatting agent. Your sole purpose is to convert the user's input into a single, valid, minified JSON object. "
-                "You MUST adhere to the following strict rules:\n"
-                "1. The final output MUST be a single JSON object. Do not include any text, markdown, or commentary before or after the JSON.\n"
-                "2. The JSON object MUST contain ALL of the following top-level keys: 'project_title', 'start_date', 'pop', 'work_plan', 'materials_and_tools', 'travel', 'subcontracts'.\n"
-                "3. If you do not have information for a key that requires a list (like 'work_plan'), you MUST return an empty list `[]`.\n"
-                "4. The 'work_plan' key MUST be a list of objects, where each object has a 'task' (string) and 'hours' (object) key. Example: `{\"task\": \"Task Name\", \"hours\": {\"PM\": 40, \"SE\": 80}}`.\n"
-                "5. Follow the specified structure precisely."
+                "You are a strict JSON formatter. Return ONE valid, complete JSON object only. "
+                "Required structure:\n"
+                "{\n"
+                '  "project_title": "string",\n'
+                '  "start_date": "YYYY-MM-DD",\n'
+                '  "pop": "string (e.g., 12 months)",\n'
+                '  "work_plan": [{"task": "string", "hours": {"PM": number, "SE": number}}],\n'
+                '  "materials_and_tools": [{"part_number": "string", "description": "string", "vendor": "string", "quantity": number, "unit_cost": number}],\n'
+                '  "travel": [{"purpose": "string", "trips": number, "travelers": number, "days": number, "airfare": number, "lodging": number, "per_diem": number}],\n'
+                '  "subcontracts": [{"subcontractor": "string", "description": "string", "cost": number}]\n'
+                "}\n"
+                "Use empty arrays [] for missing sections, 0 for unknown numbers, empty strings for unknown text."
             )),
             UserMessage(content=(
                 f"**Original Request:**\n{new_request}\n\n"
                 f"**Detailed Estimation Data:**\n{detailed}\n\n"
-                f"**Task:** Convert the estimation data into the exact JSON structure required. Ensure the 'work_plan' key and all other required keys are present."
+                f"**Task:** Convert to the exact JSON structure specified."
             ))
         ], max_tokens=2200, request_timeout=60)
 
@@ -259,23 +264,19 @@ def _extract_and_validate_json(text: str) -> Optional[Dict[str, Any]]:
     if not text:
         return None
     
-    # Strategy 1: Direct JSON parse (if response is clean)
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
     
-    # Strategy 2: Extract JSON object from mixed content
     json_obj = _extract_json_from_response(text)
     if json_obj:
         return json_obj
     
-    # Strategy 3: Lenient parsing with cleanup
     return _try_lenient_json(text)
 
 def _extract_json_from_response(text: str) -> Optional[Dict]:
     """Extract a JSON object from a string (handles models that add prose)."""
-    # Find JSON object boundaries
     brace_level = 0
     start_pos = -1
     
@@ -293,7 +294,6 @@ def _extract_json_from_response(text: str) -> Optional[Dict]:
                 except json.JSONDecodeError:
                     continue
     
-    # Fallback to regex if brace counting fails
     match = re.search(r'\{.*\}', text, re.DOTALL)
     if match:
         try:
@@ -308,22 +308,20 @@ def _try_lenient_json(text: str) -> Optional[Dict]:
     if not text:
         return None
     
-    # Extract potential JSON
     match = re.search(r'\{.*\}', text, re.DOTALL)
     if not match:
         return None
     
     json_str = match.group(0)
     
-    # Common fixes
     fixes = [
-        (r'\{\s*\.\.\.\s*\}', '{}'),  # Replace {...} with {}
-        (r'\[\s*\.\.\.\s*\]', '[]'),  # Replace [...] with []
-        (r'\[calculated value\]', '0'),  # Replace placeholders
-        (r'\bNaN\b', '0'),  # Replace NaN
-        (r'(?m)^\s*//.*$', ''),  # Remove JS-style comments
-        (r',\s*}', '}'),  # Fix trailing commas in objects
-        (r',\s*]', ']'),  # Fix trailing commas in arrays
+        (r'\{\s*\.\.\.\s*\}', '{}'),
+        (r'\[\s*\.\.\.\s*\]', '[]'),
+        (r'\[calculated value\]', '0'),
+        (r'\bNaN\b', '0'),
+        (r'(?m)^\s*//.*$', ''),
+        (r',\s*}', '}'),
+        (r',\s*]', ']'),
     ]
     
     for pattern, replacement in fixes:
@@ -343,11 +341,9 @@ def run_pipeline_logic(job_id: str) -> None:
     """Enhanced pipeline with better error handling and logging."""
     current_time = time.time()
     pipeline_jobs[job_id] = {
-        "status": "running",
-        "phase": "initializing",
+        "status": "running", "phase": "initializing",
         "log": [{"text": "✅ Pipeline Started", "timestamp": datetime.now().isoformat()}],
-        "opps_report_filename": None,
-        "match_report_filename": None,
+        "opps_report_filename": None, "match_report_filename": None,
         "created_at": current_time,
     }
     log = pipeline_jobs[job_id]["log"]
@@ -379,7 +375,6 @@ def run_pipeline_logic(job_id: str) -> None:
             timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
             opps_filename = f"Opportunity_Report_{timestamp}.xlsx"
             opps_path = os.path.join(REPORTS_DIR, opps_filename)
-            
             opps_df.to_excel(opps_path, index=False)
             pipeline_jobs[job_id]["opps_report_filename"] = opps_filename
             add_log(f"📊 Primary Report Generated: {opps_filename}")
@@ -388,7 +383,6 @@ def run_pipeline_logic(job_id: str) -> None:
             timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
             match_filename = f"Strategic_Matchmaking_Report_{timestamp}.xlsx"
             match_path = os.path.join(REPORTS_DIR, match_filename)
-            
             matchmaking_df.to_excel(match_path, index=False)
             pipeline_jobs[job_id]["match_report_filename"] = match_filename
             add_log(f"🤝 Matchmaking Report Generated: {match_filename}")
@@ -408,11 +402,8 @@ def _run_boe_job(job_id: str, new_request: str, case_history: str) -> None:
     """Enhanced BoE job with better tracking and error handling."""
     current_time = time.time()
     estimate_jobs[job_id] = {
-        "status": "running",
-        "log": [],
-        "result": None,
-        "error": None,
-        "created_at": current_time,
+        "status": "running", "log": [], "result": None,
+        "error": None, "created_at": current_time,
     }
     log = estimate_jobs[job_id]["log"]
     
@@ -479,7 +470,6 @@ def load_project_data():
             stream.seek(0)
             df = pd.read_excel(stream)
         
-        # Validate and transform data
         column_mapping = {
             "project_id": "projectName",
             "project_pia": "pi", 
@@ -496,7 +486,6 @@ def load_project_data():
             logger.error(error_msg)
             return pd.DataFrame(), error_msg
         
-        # Transform data
         df_filtered = df[list(column_mapping)].rename(columns=column_mapping)
         df_filtered["startDate"] = pd.to_datetime(df_filtered["startDate"], errors="coerce").dt.strftime("%Y-%m-%d")
         df_filtered["endDate"] = pd.to_datetime(df_filtered["endDate"], errors="coerce").dt.strftime("%Y-%m-%d")
@@ -515,12 +504,8 @@ def load_project_data():
 # ======================================================================
 
 async def _call_ai_agent(
-    client: AsyncAzureOpenAI,
-    model_deployment: str,
-    system_prompt: str,
-    user_prompt: str,
-    is_json: bool = False,
-    max_retries: int = 2,
+    client: AsyncAzureOpenAI, model_deployment: str, system_prompt: str,
+    user_prompt: str, is_json: bool = False, max_retries: int = 2,
 ) -> str:
     """Enhanced AI agent call with retry logic."""
     base_kwargs = dict(
@@ -529,35 +514,31 @@ async def _call_ai_agent(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        temperature=0.1,
-        max_tokens=4096,
+        temperature=0.1, max_tokens=4096,
     )
     
     last_exception = None
     for attempt in range(max_retries + 1):
         try:
-            if is_json and attempt == 0:  # Try JSON mode first
+            if is_json and attempt == 0:
                 response = await client.chat.completions.create(
-                    **base_kwargs,  # type: ignore[arg-type]
-                    response_format={"type": "json_object"},  # type: ignore[arg-type]
+                    **base_kwargs, response_format={"type": "json_object"} # type: ignore
                 )
             else:
-                response = await client.chat.completions.create(**base_kwargs)  # type: ignore[arg-type]
+                response = await client.chat.completions.create(**base_kwargs) # type: ignore
 
             content = (response.choices[0].message.content or "").strip()
             if not content:
                 raise ValueError("AI returned an empty response")
-                
             return content
             
         except Exception as e:
             last_exception = e
             if attempt < max_retries:
                 logger.warning(f"AI call failed (attempt {attempt + 1}), retrying: {e}")
-                await asyncio.sleep(1.0 * (attempt + 1))  # Exponential backoff
+                await asyncio.sleep(1.0 * (attempt + 1))
                 continue
     
-    # FIX: Explicitly raise an error if all retries fail.
     raise RuntimeError("AI call failed after all retries.") from last_exception
 
 async def get_improved_ai_summary(description: str, update: str) -> str:
@@ -616,10 +597,8 @@ def index():
 @app.route("/status")
 def status():
     return jsonify({
-        "status": "running",
-        "timestamp": datetime.now().isoformat(),
-        "active_pipeline_jobs": len(pipeline_jobs),
-        "active_estimate_jobs": len(estimate_jobs)
+        "status": "running", "timestamp": datetime.now().isoformat(),
+        "active_pipeline_jobs": len(pipeline_jobs), "active_estimate_jobs": len(estimate_jobs)
     })
 
 @app.route("/api/run-pipeline", methods=["POST"])
@@ -740,7 +719,6 @@ async def api_update_project():
         if not data:
             return jsonify({"success": False, "error": "Invalid request data"}), 400
 
-        # Validate required fields
         required_fields = ["projectName", "month", "year", "managerUpdate"]
         missing_fields = [field for field in required_fields if not data.get(field)]
         if missing_fields:
@@ -749,14 +727,12 @@ async def api_update_project():
                 "error": f"Missing required fields: {', '.join(missing_fields)}"
             }), 400
 
-        # Generate AI summary
         description = data.get("description", "")
         manager_update = data["managerUpdate"]
         
         logger.info(f"Generating AI summary for project: {data['projectName']}")
         ai_summary = await get_improved_ai_summary(description, manager_update)
 
-        # Prepare new entry
         year_val = int(data["year"])
         new_entry = pd.DataFrame([{
             "projectName": data["projectName"],
@@ -766,7 +742,6 @@ async def api_update_project():
             "aiSummary": ai_summary,
         }])
 
-        # Save to Azure Blob Storage
         connect_str = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
         if not connect_str:
             return jsonify({"success": False, "error": "Storage not configured"}), 500
@@ -774,7 +749,6 @@ async def api_update_project():
         blob_service_client = BlobServiceClient.from_connection_string(connect_str)
         blob_client = blob_service_client.get_blob_client(BLOB_CONTAINER_NAME, UPDATES_FILE)
 
-        # Load existing data or create new
         if blob_client.exists():
             with io.BytesIO() as stream:
                 blob_client.download_blob().readinto(stream)
@@ -783,19 +757,11 @@ async def api_update_project():
             
             updates_df["year"] = pd.to_numeric(updates_df["year"], errors="coerce").fillna(0).astype(int)
             
-            # Remove existing entry for same project/month/year
-            updates_df = updates_df[
-                ~(
-                    (updates_df["projectName"] == data["projectName"])
-                    & (updates_df["month"] == data["month"])
-                    & (updates_df["year"] == year_val)
-                )
-            ]
+            updates_df = updates_df[~((updates_df["projectName"] == data["projectName"]) & (updates_df["month"] == data["month"]) & (updates_df["year"] == year_val))]
             final_df = pd.concat([updates_df, new_entry], ignore_index=True)
         else:
             final_df = new_entry
 
-        # Save updated data
         csv_data = final_df.to_csv(index=False)
         blob_client.upload_blob(csv_data, overwrite=True)
         
@@ -860,7 +826,6 @@ def api_estimate_status(job_id: str):
     if not job:
         return jsonify({"status": "not_found", "error": "Job not found"}), 404
     
-    # Return job status with all details
     return jsonify(job)
 
 @app.route("/api/selftest/deepseek")
@@ -875,7 +840,6 @@ def selftest_deepseek():
         text = (resp.choices[0].message.content or "").strip()
         logger.info(f"DeepSeek self-test response: {text}")
         
-        # Try to parse the response as JSON
         try:
             parsed = json.loads(text)
             return jsonify({"ok": True, "parsed": parsed, "raw": text})
@@ -888,7 +852,6 @@ def selftest_deepseek():
 
 @app.route("/api/selftest/aoai")
 def selftest_aoai():
-    import asyncio
     
     async def test_aoai():
         client = None
@@ -1249,7 +1212,7 @@ try:
 except Exception as e:
     print(f"STARTUP ERROR: {e}")
     print("Application may not function correctly.")
-
+    
 if __name__ == "__main__":
     # Local development only (App Service uses gunicorn)
     port = int(os.getenv("PORT", "5001"))
