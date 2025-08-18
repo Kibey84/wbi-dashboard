@@ -212,27 +212,22 @@ def deepseek_emit_estimate(new_request: str, case_history: str) -> Dict[str, Any
         if not detailed:
             raise ValueError("Estimation step returned empty response")
 
-        # Step 3: JSON formatting with validation
+        # Step 3: JSON formatting with validation (CORRECTED PROMPT)
         logger.info("Step 3: Formatting as structured JSON")
         final_resp = deepseek_complete([
             SystemMessage(content=(
-                "You are a strict JSON formatter. Return ONE valid, complete JSON object only. "
-                "Required structure:\n"
-                "{\n"
-                '  "project_title": "string",\n'
-                '  "start_date": "YYYY-MM-DD",\n'
-                '  "pop": "string (e.g., 12 months)",\n'
-                '  "work_plan": [{"task": "string", "hours": {"PM": number, "SE": number}}],\n'
-                '  "materials_and_tools": [{"part_number": "string", "description": "string", "vendor": "string", "quantity": number, "unit_cost": number}],\n'
-                '  "travel": [{"purpose": "string", "trips": number, "travelers": number, "days": number, "airfare": number, "lodging": number, "per_diem": number}],\n'
-                '  "subcontracts": [{"subcontractor": "string", "description": "string", "cost": number}]\n'
-                "}\n"
-                "Use empty arrays [] for missing sections, 0 for unknown numbers, empty strings for unknown text."
+                "You are a strict JSON formatting agent. Your sole purpose is to convert the user's input into a single, valid, minified JSON object. "
+                "You MUST adhere to the following strict rules:\n"
+                "1. The final output MUST be a single JSON object. Do not include any text, markdown, or commentary before or after the JSON.\n"
+                "2. The JSON object MUST contain ALL of the following top-level keys: 'project_title', 'start_date', 'pop', 'work_plan', 'materials_and_tools', 'travel', 'subcontracts'.\n"
+                "3. If you do not have information for a key that requires a list (like 'work_plan'), you MUST return an empty list `[]`.\n"
+                "4. The 'work_plan' key MUST be a list of objects, where each object has a 'task' (string) and 'hours' (object) key. Example: `{\"task\": \"Task Name\", \"hours\": {\"PM\": 40, \"SE\": 80}}`.\n"
+                "5. Follow the specified structure precisely."
             )),
             UserMessage(content=(
                 f"**Original Request:**\n{new_request}\n\n"
                 f"**Detailed Estimation Data:**\n{detailed}\n\n"
-                f"**Task:** Convert to the exact JSON structure specified."
+                f"**Task:** Convert the estimation data into the exact JSON structure required. Ensure the 'work_plan' key and all other required keys are present."
             ))
         ], max_tokens=2200, request_timeout=60)
 

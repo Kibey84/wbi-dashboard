@@ -14,19 +14,15 @@ import inspect
 
 logging.info(f"Using SAM_GOV_API_KEY present? {'YES' if bool(os.getenv('SAM_GOV_API_KEY')) else 'NO'}")
 
-# --- Azure AI Inference Imports ---
-from azure.ai.inference.aio import ChatCompletionsClient
-from azure.ai.inference.models import SystemMessage, UserMessage
-from azure.core.credentials import AzureKeyCredential
+# --- Azure AI Imports ---
 from openai import AsyncAzureOpenAI
 
 # --- All Module Imports ---
+# This line assumes there is a `tools/__init__.py` that defines FETCH_FUNCTIONS
 from . import FETCH_FUNCTIONS
 
 # --- Constants ---
-# Set to True for testing mode, which skips AI analysis and uses dummy data
 TESTING_MODE = False
-
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(TOOLS_DIR, "config.json")
 COMPANY_KNOWLEDGE_FILE = os.path.join(TOOLS_DIR, "WBI Knowledge.docx")
@@ -77,20 +73,33 @@ def load_company_knowledge():
     doc = docx.Document(COMPANY_KNOWLEDGE_FILE)
     return '\n'.join(para.text for para in doc.paragraphs)
 
-# ------------------ SCRAPER CONFIG ------------------
+# ------------------ SCRAPER CONFIG (FIXED) ------------------
 def load_scraper_config():
+    """Loads and validates the scraper configuration from config.json."""
     with open(CONFIG_FILE, 'r') as f:
         config = json.load(f)
-    valid = []
+    
+    valid_scrapers = []
     for scraper in config.get('scrapers', []):
         func_name = scraper.get('function')
         if not func_name:
+            logging.warning(f"Scraper '{scraper.get('name')}' is missing a 'function' name in config and will be skipped.")
             continue
+        
         if func_name in FETCH_FUNCTIONS:
+            # Replace the function name string with the actual function object
             scraper['function'] = FETCH_FUNCTIONS[func_name]
-            valid.append(scraper)
-        logging.info("Loaded scrapers: " + ", ".join(s['name'] for s in valid))
-    return valid
+            valid_scrapers.append(scraper)
+        else:
+            logging.warning(f"Function '{func_name}' for scraper '{scraper.get('name')}' not found in FETCH_FUNCTIONS and will be skipped.")
+            
+    # FIX: Moved the logging statement outside the loop to print a single, complete list.
+    if valid_scrapers:
+        logging.info("Loaded scrapers: " + ", ".join(s['name'] for s in valid_scrapers))
+    else:
+        logging.error("No valid scrapers were loaded. Check config.json and tools/__init__.py.")
+        
+    return valid_scrapers
 
 def run_scraper_task(scraper_config):
     name = scraper_config['name']
@@ -110,7 +119,7 @@ def run_scraper_task(scraper_config):
         logging.error(f"Scraper failed for {name}: {e}", exc_info=True)
         return [], e
 
-# ------------------ AI ANALYSIS (REFACTORED with stable 'openai' library) ------------------
+# ------------------ AI ANALYSIS ------------------
 async def analyze_opportunity_with_ai(opportunity, knowledge, client: AsyncAzureOpenAI):
     """Async analysis function that uses the stable openai client."""
     text = f"""
@@ -164,7 +173,7 @@ async def analyze_opportunity_with_ai(opportunity, knowledge, client: AsyncAzure
         return None
 
 
-# ------------------ MAIN PIPELINE (REFACTORED WITH BATCHING) ------------------
+# ------------------ MAIN PIPELINE ------------------
 def run_wbi_pipeline(log):
     if not all([AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_KEY, AZURE_OPENAI_DEPLOYMENT]):
         log.append({"text": "❌ ERROR: Azure AI environment variables are not set. Halting pipeline."})
@@ -208,7 +217,6 @@ def run_wbi_pipeline(log):
 
     log.append({"text": f"Found {len(all_opps)} opportunities. Starting AI analysis..."})
 
-    # --- EFFICIENT ASYNC AI ANALYSIS WITH BATCHING ---
     relevant = []
     BATCH_SIZE = 5
 
@@ -238,7 +246,6 @@ def run_wbi_pipeline(log):
             await asyncio.sleep(1)
 
     asyncio.run(main_analysis())
-    # --- END OF BATCHING BLOCK ---
 
     df_opps = pd.DataFrame(relevant)
     if not df_opps.empty:
