@@ -1,3 +1,4 @@
+
 from .dod_sbir_scraper import fetch_dod_sbir_sttr_topics
 from .nasa_sbir_module import fetch_nasa_sbir_opportunities
 from .darpa_module import fetch_darpa_opportunities
@@ -19,23 +20,23 @@ from .sbir_pipeline_scraper import fetch_sbir_partnership_opportunities
 from .sam_gov_module import fetch_sam_gov_opportunities
 
 FETCH_FUNCTIONS = {
-    "DoD SBIR/STTR": fetch_dod_sbir_sttr_topics,
-    "NASA SBIR": fetch_nasa_sbir_opportunities,
-    "DARPA": fetch_darpa_opportunities,
-    "ARPA-H": fetch_arpah_opportunities,
-    "EUREKA": fetch_eureka_opportunities,
-    "NSIN": fetch_nsin_opportunities,
-    "NIH SBIR": fetch_nih_sbir_opportunities,
-    "NSTXL": fetch_nstxl_opportunities,
-    "MTEC": fetch_mtec_opportunities,
-    "AFWERX": fetch_afwerx_opportunities,
-    "DIU": fetch_diu_opportunities,
-    "SOCOM BAA": fetch_socom_opportunities,
-    "ARL": fetch_arl_opportunities,
-    "NASC Solutions": fetch_nasc_opportunities,
-    "OSTI FOA": fetch_osti_foas,
-    "ARPA-E": fetch_arpae_opportunities,
-    "IARPA": fetch_iarpa_opportunities,
-    "SBIR Partnerships": fetch_sbir_partnership_opportunities,
-    "SAM.gov": fetch_sam_gov_opportunities
+    "fetch_dod_sbir_sttr_topics": fetch_dod_sbir_sttr_topics,
+    "fetch_nasa_sbir_opportunities": fetch_nasa_sbir_opportunities,
+    "fetch_darpa_opportunities": fetch_darpa_opportunities,
+    "fetch_arpah_opportunities": fetch_arpah_opportunities,
+    "fetch_eureka_opportunities": fetch_eureka_opportunities,
+    "fetch_nsin_opportunities": fetch_nsin_opportunities,
+    "fetch_nih_sbir_opportunities": fetch_nih_sbir_opportunities,
+    "fetch_nstxl_opportunities": fetch_nstxl_opportunities,
+    "fetch_mtec_opportunities": fetch_mtec_opportunities,
+    "fetch_afwerx_opportunities": fetch_afwerx_opportunities,
+    "fetch_diu_opportunities": fetch_diu_opportunities,
+    "fetch_socom_opportunities": fetch_socom_opportunities,
+    "fetch_arl_opportunities": fetch_arl_opportunities,
+    "fetch_nasc_opportunities": fetch_nasc_opportunities,
+    "fetch_osti_foas": fetch_osti_foas,
+    "fetch_arpae_opportunities": fetch_arpae_opportunities,
+    "fetch_iarpa_opportunities": fetch_iarpa_opportunities,
+    "fetch_sbir_partnership_opportunities": fetch_sbir_partnership_opportunities,
+    "fetch_sam_gov_opportunities": fetch_sam_gov_opportunities,
 }

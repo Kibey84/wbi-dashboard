@@ -236,17 +236,15 @@ def deepseek_emit_estimate(new_request: str, case_history: str) -> Dict[str, Any
         if not final_json_str:
             raise ValueError("JSON formatting step returned empty response")
 
-        # Enhanced JSON parsing with multiple fallback strategies
         data = _extract_and_validate_json(final_json_str)
         if not data:
             logger.error("Failed to extract valid JSON. Raw response (first 500 chars): %s", final_json_str[:500])
             raise ValueError("Model returned no valid JSON after all parsing attempts.")
         
-        # Validate required fields
         required_fields = ["project_title", "work_plan", "materials_and_tools", "travel", "subcontracts"]
         for field in required_fields:
             if field not in data:
-                logger.warning(f"Missing required field '{field}', adding default value")
+                logger.warning(f"Missing required field '{field}' in final JSON, adding default value")
                 data[field] = [] if field != "project_title" else "Untitled Project"
         
         logger.info("✅ Successfully generated BoE estimate")
