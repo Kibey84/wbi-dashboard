@@ -2,11 +2,11 @@
 import { AppState } from './modules/state.js';
 import { NotificationService } from './modules/notifications.js';
 import { Utils } from './modules/utils.js';
-import { TabManager } from './modules/tabManager.js';
+import { TabManager } from './modules/tabmanager.js';
 import { PipelineManager } from './modules/pipeline.js';
-import { OrgChartManager } from './modules/orgChart.js';
-import { ProjectReportingManager } from './modules/projectReporting.js';
-import { BoeGeneratorManager } from './modules/boeGenerator.js';
+import { OrgChartManager } from './modules/orgchart.js';
+import { ProjectReportingManager } from './modules/projectreporting.js';
+import { BoeGeneratorManager } from './modules/boegenerator.js';
 
 class Application {
     constructor() {
